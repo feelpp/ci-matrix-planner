@@ -4,13 +4,82 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20] # add 18 if you want to support both
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+
+      - name: Use Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
         with:
-          node-version: "20"
-      - name: Run tests
-        run: node tests/run.js
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # 1) Install dependencies for this repo
+      - name: Install
+        run: npm ci
+
+      # 2) Build your action bundle if you ship a compiled dist/
+      #    (uncomment if you have a build step)
+      # - name: Build
+      #   run: npm run build
+
+      # 3) Run unit tests (adjust to your script)
+      - name: Test
+        run: |
+          if npm run | grep -qE '^  test'; then
+            npm test
+          else
+            node tests/run.js
+          fi
+
+  smoke:
+    name: Smoke test action
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install (for local action runtime deps)
+        run: npm ci
+
+      # If your action uses a compiled dist/index.js, ensure it exists
+      # - name: Build
+      #   run: npm run build
+
+      # 4) Run the action from this repo (./) and capture outputs
+      - name: Run planner (local action)
+        id: plan
+        uses: ./
+        with:
+          # point to a minimal config file in this repo
+          config-path: .github/plan-ci.json
+          # force deterministic message so tests don't depend on PR context
+          message-override: |
+            only=feelpp
+            targets=fedora:42
+
+      - name: Assert outputs are present
+        run: |
+          echo "mode=${{ steps.plan.outputs.mode }}"
+          echo "only_jobs=${{ steps.plan.outputs.only_jobs }}"
+          echo "skip_jobs=${{ steps.plan.outputs.skip_jobs }}"
+          echo "targets_json=${{ steps.plan.outputs.targets_json }}"
+          echo "targets_list=${{ steps.plan.outputs.targets_list }}"
+          echo "enabled_jobs=${{ steps.plan.outputs.enabled_jobs }}"
+          test -n "${{ steps.plan.outputs.mode }}"
+          test -n "${{ steps.plan.outputs.targets_json }}"
