@@ -322,6 +322,7 @@ if (require.main === module) {
       core.setOutput("skip_jobs", plan.skipJobs);
       core.setOutput("targets_json", plan.targetsJson);
       core.setOutput("targets_list", plan.targetsList);
+      core.setOutput("enabled_jobs", plan.enabledJobs.join(" "));
 
       // 7) Summary
       core.info("---- planner summary ----");
