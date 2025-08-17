@@ -1,8 +1,11 @@
 name: "CI Matrix Planner"
 description: "Parses commit/PR message and labels to compute enabled jobs and targets"
+runs:
+  using: node20
+  main: index.js  # or index.js if you ship raw + node_modules
 branding:
-  icon: “grid”     # Feather icon name: https://feathericons.com/
-  color: “blue”    # One of: white, yellow, blue, green, orange, red, purple, gray, black
+  icon: grid     # Feather icon name: https://feathericons.com/
+  color: blue    # One of: white, yellow, blue, green, orange, red, purple, gray, black
 inputs:
   config-path:
     description: "Path to JSON config file in the consumer repo"
@@ -37,6 +40,4 @@ outputs:
     description: "Space-separated list of targets"
   enabled_jobs:
     description: space-separated list of jobs that will run    
-runs:
-  using: "node20"
-  main: "index.js"
+

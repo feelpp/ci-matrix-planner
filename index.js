@@ -3,10 +3,12 @@ const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const { execSync } = require("child_process");
+const core = require("@actions/core");
 
 /* =========================
- * Helpers (HTTP / env)
+ * Small helpers
  * ========================= */
+
 function httpGetJson(url, token) {
   return new Promise((resolve, reject) => {
     const req = https.request(
@@ -45,8 +47,9 @@ function env(name, def = "") {
 }
 
 /* =========================
- * Pure, testable planner API
+ * Pure planner utilities
  * ========================= */
+
 function parseDirectives(msg) {
   const out = {};
   if (!msg) return out;
@@ -98,11 +101,11 @@ function computePlan(opts) {
     "components";
   mode = String(mode).toLowerCase();
 
-  // Jobs universe & defaults
+  // Job universe & defaults
   const jobsCfg = cfg.jobs || ["feelpp", "testsuite", "toolboxes", "mor", "python"];
   const defaultJobs = cfg.defaults?.jobs || jobsCfg;
 
-  // Targets universe & defaults
+  // Target universe & defaults
   const targetsCfg =
     cfg.targets ||
     ["ubuntu:24.04", "ubuntu:22.04", "debian:13", "debian:12", "fedora:42"];
@@ -139,7 +142,7 @@ function computePlan(opts) {
   // Resolve targets
   let workingTargets = [...defaultTargets];
 
-  // Allow `only=` to specify targets if it contains colon(s)
+  // If only= contains platform-like specs (with ":"), treat it as targets filter
   if (directives.only && directives.only.includes(":")) {
     workingTargets = normalizeList(directives.only);
   }
@@ -160,81 +163,55 @@ function computePlan(opts) {
     workingTargets = [...defaultTargets];
   }
 
-  // Convert to outputs
-  const targetsJson = JSON.stringify(workingTargets);
-  const targetsList = workingTargets.join(" ");
-
   return {
     mode,
     enabledJobs,
     onlyJobs: onlyJobs.join(" "),
     skipJobs: skipJobs.join(" "),
-    targetsJson,
-    targetsList,
+    targetsJson: JSON.stringify(workingTargets),
+    targetsList: workingTargets.join(" "),
   };
 }
 
 /* =========================
- * GitHub Action entrypoint
+ * Action entrypoint
  * ========================= */
-if (require.main === module) {
-  const core = {
-    getInput(name) {
-      return process.env[`INPUT_${name.replace(/ /g, "_").toUpperCase()}`] || "";
-    },
-    setOutput(name, value) {
-      const delim = `EOF_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-      process.stdout.write(`${name}<<${delim}\n${value}\n${delim}\n`);
-    },
-    info: console.log,
-    warning: console.warn,
-  };
 
+if (require.main === module) {
   (async () => {
     try {
+      // Inputs
+      const configPath      = core.getInput("config-path") || ".github/plan-ci.json";
+      const token           = core.getInput("github-token") || env("GITHUB_TOKEN") || env("GH_TOKEN") || "";
+      const messageOverride = core.getInput("message-override") || "";
+      const labelsOverride  = core.getInput("labels-override") || "";
+      const modeInput       = core.getInput("mode-input") || "";
+
       // Load optional config
-      const configPath = core.getInput("config-path") || ".github/plan-ci.json";
       let config = {};
       try {
         const cfgText = fs.readFileSync(path.resolve(process.cwd(), configPath), "utf8");
         config = JSON.parse(cfgText);
       } catch (e) {
-        core.warning(`No config found at ${configPath}, using defaults. (${e.message})`);
+        core.warning(`No config at ${configPath}; using defaults. (${e.message})`);
       }
 
-      // Inputs / env
-      const token =
-        core.getInput("github-token") ||
-        env("GITHUB_TOKEN") ||
-        env("GH_TOKEN") ||
-        "";
+      // Build canonical message + labels
+      let message = messageOverride;
+      let labels = normalizeList(labelsOverride);
 
-      const repo = env("GITHUB_REPOSITORY"); // owner/repo
-      const [owner, repoName] = repo ? repo.split("/") : ["", ""];
-      const eventName = env("GITHUB_EVENT_NAME");
+      const repoFull = env("GITHUB_REPOSITORY"); // owner/repo
+      const [owner, repo] = repoFull ? repoFull.split("/") : ["", ""];
       const eventPath = env("GITHUB_EVENT_PATH");
       const sha = env("GITHUB_SHA");
-      const prNumber = (() => {
-        try {
-          if (eventPath && fs.existsSync(eventPath)) {
-            const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
-            return ev.pull_request ? ev.pull_request.number : null;
-          }
-        } catch (_) {}
-        return null;
-      })();
 
-      // 1) Start from overrides (if any)
-      let message = core.getInput("message-override") || "";
-      let labels = normalizeList(core.getInput("labels-override"));
-
-      // 2) If none, use PR title/body (for PR) or head_commit.message (for push)
+      // Prefer PR title/body when available; otherwise push head_commit
       if (!message && eventPath && fs.existsSync(eventPath)) {
         try {
           const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
           if (ev.pull_request) {
             const title = ev.pull_request.title || "";
-            const body = ev.pull_request.body || "";
+            const body  = ev.pull_request.body || "";
             message = `${title}\n\n${body}`.trim();
             labels = (ev.pull_request.labels || [])
               .map((l) => (l && (l.name || l)) ? String(l.name || l).toLowerCase() : "")
@@ -249,40 +226,35 @@ if (require.main === module) {
         }
       }
 
-      // Utility to detect presence of directives
       const hasDirective = (txt) =>
         /\b(only|skip|targets|include|exclude|mode)\s*=/.test(txt || "");
 
-      // 3) If PR text has no directives, fetch the latest commit message via GitHub API
-      if (!hasDirective(message) && token && owner && repoName) {
+      // If PR text has no directives, fetch last commit message via API
+      if (!hasDirective(message) && token && owner && repo && eventPath && fs.existsSync(eventPath)) {
         try {
-          if (prNumber) {
-            // PR: fetch commits, use the last one’s message
+          const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+          if (ev.pull_request) {
+            const prNumber = ev.pull_request.number;
             const commits = await httpGetJson(
-              `https://api.github.com/repos/${owner}/${repoName}/pulls/${prNumber}/commits`,
+              `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits`,
               token
             );
             if (Array.isArray(commits) && commits.length) {
               const last = commits[commits.length - 1];
-              const commitMsg = last && last.commit && last.commit.message
-                ? last.commit.message
-                : "";
+              const commitMsg = last?.commit?.message || "";
               if (hasDirective(commitMsg)) {
                 message = `${message ? message + "\n\n---\n" : ""}${commitMsg}`;
                 core.info("Planner: directives found in PR head commit via API.");
               }
             }
           } else if (sha) {
-            // Push: ensure we have the commit message via API if not already
             const commit = await httpGetJson(
-              `https://api.github.com/repos/${owner}/${repoName}/commits/${sha}`,
+              `https://api.github.com/repos/${owner}/${repo}/commits/${sha}`,
               token
             );
-            const commitMsg = commit && commit.commit && commit.commit.message
-              ? commit.commit.message
-              : "";
+            const commitMsg = commit?.commit?.message || "";
             if (hasDirective(commitMsg)) {
-              message = commitMsg; // for push, prefer head commit
+              message = commitMsg;
               core.info("Planner: directives found in push head commit via API.");
             }
           }
@@ -291,7 +263,7 @@ if (require.main === module) {
         }
       }
 
-      // 4) As a last resort (if the repo *is* checked out), try git log -1
+      // Fallback to git log -1 if still no directives and repo is checked out
       if (!hasDirective(message)) {
         try {
           const gitMsg = execSync("git log -1 --pretty=%B", {
@@ -304,19 +276,18 @@ if (require.main === module) {
             core.info("Planner: directives found in latest commit via git log.");
           }
         } catch {
-          // ignore (no checkout)
+          // ignore
         }
       }
 
-      // 5) Compute plan
       const plan = computePlan({
         config,
         message,
         labels,
-        inputs: { modeInput: core.getInput("mode-input") },
+        inputs: { modeInput },
       });
 
-      // 6) Emit outputs
+      // Emit outputs via official SDK (reliable)
       core.setOutput("mode", plan.mode);
       core.setOutput("only_jobs", plan.onlyJobs);
       core.setOutput("skip_jobs", plan.skipJobs);
@@ -324,7 +295,7 @@ if (require.main === module) {
       core.setOutput("targets_list", plan.targetsList);
       core.setOutput("enabled_jobs", plan.enabledJobs.join(" "));
 
-      // 7) Summary
+      // Summary
       core.info("---- planner summary ----");
       core.info(`MODE: ${plan.mode}`);
       core.info(`ENABLED_JOBS: ${plan.enabledJobs.join(" ")}`);
@@ -334,10 +305,10 @@ if (require.main === module) {
       core.info(`TARGETS_JSON: ${plan.targetsJson}`);
       core.info("-------------------------");
     } catch (err) {
-      console.error(err);
-      process.exit(1);
+      core.setFailed(err instanceof Error ? err.message : String(err));
     }
   })();
 }
 
+// Export pure utils for unit tests
 module.exports = { computePlan, parseDirectives, normalizeList, lowerUnique };

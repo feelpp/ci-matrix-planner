@@ -4,13 +4,85 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: Unit tests (Node ${{ matrix.node }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+
+      - name: Use Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
         with:
-          node-version: "20"
-      - name: Run tests
-        run: node tests/run.js
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # If you ship a compiled dist/, keep this ON so tests import what the action uses.
+      - name: Build
+        run: npm run build
+
+      - name: Run unit tests
+        shell: bash
+        run: |
+          if npm run | grep -qE '^  test'; then
+            npm test
+          else
+            node tests/run.js
+          fi
+
+  smoke:
+    name: Smoke test action (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # Ensure dist/index.js exists for `uses: ./`
+      - name: Build
+        run: npm run build
+
+      - name: Run planner (local action)
+        id: plan
+        uses: ./
+        with:
+          config-path: .github/plan-ci.json
+          # deterministic message so smoke doesn’t depend on PR context
+          message-override: |
+            only=feelpp
+            targets=fedora:42
+
+      - name: Assert outputs are present
+        shell: bash
+        run: |
+          echo "mode=${{ steps.plan.outputs.mode }}"
+          echo "only_jobs=${{ steps.plan.outputs.only_jobs }}"
+          echo "skip_jobs=${{ steps.plan.outputs.skip_jobs }}"
+          echo "targets_json=${{ steps.plan.outputs.targets_json }}"
+          echo "targets_list=${{ steps.plan.outputs.targets_list }}"
+          echo "enabled_jobs=${{ steps.plan.outputs.enabled_jobs }}"
+          test -n "${{ steps.plan.outputs.mode }}"
+          test -n "${{ steps.plan.outputs.targets_json }}"
