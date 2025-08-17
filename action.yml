@@ -1,5 +1,8 @@
 name: "CI Matrix Planner"
 description: "Parses commit/PR message and labels to compute enabled jobs and targets"
+branding:
+  icon: “grid”     # Feather icon name: https://feathericons.com/
+  color: “blue”    # One of: white, yellow, blue, green, orange, red, purple, gray, black
 inputs:
   config-path:
     description: "Path to JSON config file in the consumer repo"
