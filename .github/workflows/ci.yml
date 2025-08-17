@@ -30,7 +30,13 @@ jobs:
 
       # If you ship a compiled dist/, keep this ON so tests import what the action uses.
       - name: Build
-        run: npm run build
+        run: |
+          npm run build
+          if ! git diff --exit-code -- dist; then
+            echo "::error::dist/ is out of date. Run 'npm run build' and commit changes."
+            exit 1
+          fi
+
 
       - name: Run unit tests
         shell: bash
