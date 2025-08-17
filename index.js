@@ -1,11 +1,16 @@
+// index.js
 const fs = require("fs");
 const path = require("path");
+const { execSync } = require("child_process");
 
-// ---------------- Pure, testable planner ----------------
+/* =========================
+ * Pure, testable planner API
+ * ========================= */
+
 function parseDirectives(msg) {
   const out = {};
   if (!msg) return out;
-  const lines = msg.split(/\r?\n/);
+  const lines = String(msg).split(/\r?\n/);
   for (const ln of lines) {
     const m = ln.match(/^\s*([A-Za-z_]+)\s*=\s*(.+?)\s*$/);
     if (m) {
@@ -19,7 +24,7 @@ function parseDirectives(msg) {
 
 function normalizeList(raw) {
   if (!raw) return [];
-  return raw
+  return String(raw)
     .split(/[, \n]+/)
     .map((s) => s.trim())
     .filter(Boolean);
@@ -28,7 +33,7 @@ function normalizeList(raw) {
 function lowerUnique(list) {
   const seen = new Set();
   const out = [];
-  for (const x of list.map((s) => s.toLowerCase())) {
+  for (const x of list.map((s) => String(s).toLowerCase())) {
     if (!seen.has(x)) {
       seen.add(x);
       out.push(x);
@@ -51,13 +56,13 @@ function computePlan(opts) {
     directives.mode ||
     cfg.defaults?.mode ||
     "components";
-  mode = mode.toLowerCase();
+  mode = String(mode).toLowerCase();
 
-  // Jobs universe & job defaults
+  // Jobs universe & defaults
   const jobsCfg = cfg.jobs || ["feelpp", "testsuite", "toolboxes", "mor", "python"];
   const defaultJobs = cfg.defaults?.jobs || jobsCfg;
 
-  // Targets universe & default targets
+  // Targets universe & defaults
   const targetsCfg =
     cfg.targets ||
     ["ubuntu:24.04", "ubuntu:22.04", "debian:13", "debian:12", "fedora:42"];
@@ -94,7 +99,7 @@ function computePlan(opts) {
   // Resolve targets
   let workingTargets = [...defaultTargets];
 
-  // Allow `only=` to target platform-like values if they contain `:`
+  // Allow `only=` to specify targets if it contains colon(s)
   if (directives.only && directives.only.includes(":")) {
     workingTargets = normalizeList(directives.only);
   }
@@ -129,62 +134,82 @@ function computePlan(opts) {
   };
 }
 
-// ---------------- GitHub Action entrypoint ----------------
+/* =========================
+ * GitHub Action entrypoint
+ * ========================= */
+
 if (require.main === module) {
   const core = {
     getInput(name) {
       return process.env[`INPUT_${name.replace(/ /g, "_").toUpperCase()}`] || "";
     },
     setOutput(name, value) {
-      // GitHub Actions output protocol
+      // Multi-line output safe delimiter
       const delim = `EOF_${Date.now()}_${Math.random().toString(36).slice(2)}`;
       process.stdout.write(`${name}<<${delim}\n${value}\n${delim}\n`);
     },
     info: console.log,
     warning: console.warn,
-    error: console.error,
-    setFailed(msg) {
-      console.error(msg);
-      process.exit(1);
-    },
   };
 
   try {
+    // Load optional config
     const configPath = core.getInput("config-path") || ".github/plan-ci.json";
     let config = {};
     try {
-      const configText = fs.readFileSync(path.resolve(process.cwd(), configPath), "utf8");
-      config = JSON.parse(configText);
+      const cfgText = fs.readFileSync(path.resolve(process.cwd(), configPath), "utf8");
+      config = JSON.parse(cfgText);
     } catch (e) {
       core.warning(`No config found at ${configPath}, using defaults. (${e.message})`);
     }
 
-    // Try to get message + labels
-    let message = core.getInput("message-override");
+    // 1) Build a canonical message from multiple sources
+    let message = core.getInput("message-override") || "";
     let labels = normalizeList(core.getInput("labels-override"));
 
-    if (!message) {
-      // Prefer PR title+body when event is pull_request (if present in env)
-      try {
-        const eventPath = process.env.GITHUB_EVENT_PATH;
-        if (eventPath && fs.existsSync(eventPath)) {
-          const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
-          if (ev.pull_request) {
-            const title = ev.pull_request.title || "";
-            const body = ev.pull_request.body || "";
-            message = `${title}\n\n${body}`.trim();
-            labels = (ev.pull_request.labels || []).map((l) => (l.name || "").toLowerCase());
-          } else if (ev.head_commit && ev.head_commit.message) {
-            message = ev.head_commit.message;
-          } else if (ev.commits && ev.commits.length) {
-            message = ev.commits[ev.commits.length - 1].message || "";
-          }
+    // Event payload (PR title/body, labels OR push head commit)
+    try {
+      const eventPath = process.env.GITHUB_EVENT_PATH;
+      if (!message && eventPath && fs.existsSync(eventPath)) {
+        const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+        if (ev.pull_request) {
+          const title = ev.pull_request.title || "";
+          const body = ev.pull_request.body || "";
+          message = `${title}\n\n${body}`.trim();
+          labels = (ev.pull_request.labels || []).map(
+            (l) => (l && (l.name || l)) ? String(l.name || l).toLowerCase() : ""
+          ).filter(Boolean);
+        } else if (ev.head_commit && ev.head_commit.message) {
+          message = ev.head_commit.message;
+        } else if (ev.commits && ev.commits.length) {
+          message = ev.commits[ev.commits.length - 1].message || "";
         }
-      } catch (e) {
-        core.warning(`Could not read GITHUB_EVENT_PATH: ${e.message}`);
+      }
+    } catch (e) {
+      core.warning(`Could not read GITHUB_EVENT_PATH: ${e.message}`);
+    }
+
+    // 2) If no directives were found in PR text, try the latest commit message
+    const hasDirective = (txt) =>
+      /\b(only|skip|targets|include|exclude|mode)\s*=/.test(txt || "");
+    if (!hasDirective(message)) {
+      try {
+        // Requires the repo to be checked out before running this action
+        const gitMsg = execSync("git log -1 --pretty=%B", {
+          cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
+          stdio: ["ignore", "pipe", "ignore"],
+          encoding: "utf8",
+        }).trim();
+        if (hasDirective(gitMsg)) {
+          message = `${message ? message + "\n\n---\n" : ""}${gitMsg}`;
+          core.info("Planner: directives found in latest commit message (fallback).");
+        }
+      } catch {
+        // No checkout or git unavailable; ignore
       }
     }
 
+    // 3) Compute plan
     const plan = computePlan({
       config,
       message,
@@ -192,14 +217,14 @@ if (require.main === module) {
       inputs: { modeInput: core.getInput("mode-input") },
     });
 
-    // Emit outputs
+    // 4) Emit outputs
     core.setOutput("mode", plan.mode);
     core.setOutput("only_jobs", plan.onlyJobs);
     core.setOutput("skip_jobs", plan.skipJobs);
     core.setOutput("targets_json", plan.targetsJson);
     core.setOutput("targets_list", plan.targetsList);
 
-    // Handy summary for logs
+    // 5) Handy summary
     core.info("---- planner summary ----");
     core.info(`MODE: ${plan.mode}`);
     core.info(`ENABLED_JOBS: ${plan.enabledJobs.join(" ")}`);
@@ -214,4 +239,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { computePlan };
+module.exports = { computePlan, parseDirectives, normalizeList, lowerUnique };
