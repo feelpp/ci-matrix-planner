@@ -1,0 +1,46 @@
+[
+  {
+    "name": "defaults (components mode)",
+    "config": {
+      "jobs": ["feelpp", "testsuite", "toolboxes", "mor", "python"],
+      "targets": ["ubuntu:24.04", "ubuntu:22.04", "debian:13", "debian:12", "fedora:42"],
+      "defaults": { "mode": "components" }
+    },
+    "message": "",
+    "labels": [],
+    "expected": {
+      "mode": "components",
+      "enabledJobs": ["feelpp", "testsuite", "toolboxes", "mor", "python"],
+      "targetsList": "ubuntu:24.04 ubuntu:22.04 debian:13 debian:12 fedora:42"
+    }
+  },
+  {
+    "name": "only=feelpp targets=fedora:42",
+    "config": {},
+    "message": "only=feelpp\ntargets=fedora:42",
+    "labels": [],
+    "expected": {
+      "enabledJobs": ["feelpp"],
+      "targetsList": "fedora:42"
+    }
+  },
+  {
+    "name": "mode full becomes single job",
+    "config": { "fullBuild": { "job": "feelpp-spack" } },
+    "message": "mode=full",
+    "labels": [],
+    "expected": {
+      "mode": "full",
+      "enabledJobs": ["feelpp-spack"]
+    }
+  },
+  {
+    "name": "include and exclude",
+    "config": { "targets": ["ubuntu:22.04"] },
+    "message": "include=debian:12\ndelete=ignored\nexclude=ubuntu:22.04",
+    "labels": [],
+    "expected": {
+      "targetsList": "debian:12"
+    }
+  }
+]
