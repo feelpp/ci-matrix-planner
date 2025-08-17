@@ -25,6 +25,16 @@
     }
   },
   {
+    "name": "only=feelpp,toolboxes targets=fedora:42,debian:13",
+    "config": {},
+    "message": "only=feelpp,toolboxes\ntargets=fedora:42,debian:13",
+    "labels": [],
+    "expected": {
+      "enabledJobs": ["feelpp","toolboxes"],
+      "targetsList": ["fedora:42","debian:13"]
+    }
+  },
+  {
     "name": "mode full becomes single job",
     "config": { "fullBuild": { "job": "feelpp-spack" } },
     "message": "mode=full",
