@@ -1,0 +1,33 @@
+name: "CI Matrix Planner"
+description: "Parses commit/PR message and labels to compute enabled jobs and targets"
+inputs:
+  config-path:
+    description: "Path to JSON config file in the consumer repo"
+    required: false
+    default: ".github/plan-ci.json"
+  mode-input:
+    description: "Override mode via workflow_dispatch (components|full)"
+    required: false
+    default: ""
+  message-override:
+    description: "Override message for debugging"
+    required: false
+    default: ""
+  labels-override:
+    description: "Comma-separated labels for debugging"
+    required: false
+    default: ""
+outputs:
+  mode:
+    description: "Resolved mode (components|full)"
+  only_jobs:
+    description: "Space-separated list of jobs explicitly requested (may be empty)"
+  skip_jobs:
+    description: "Space-separated list of jobs to skip (may be empty)"
+  targets_json:
+    description: "JSON array of targets to use in matrix"
+  targets_list:
+    description: "Space-separated list of targets"
+runs:
+  using: "node20"
+  main: "index.js"
