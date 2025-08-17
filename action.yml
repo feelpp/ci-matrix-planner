@@ -20,6 +20,10 @@ inputs:
     description: "Comma-separated labels for debugging"
     required: false
     default: ""
+  github-token:
+    description: "GitHub token to allow reading PR commit messages via API"
+    required: false
+    default: ""
 outputs:
   mode:
     description: "Resolved mode (components|full)"
