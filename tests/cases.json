@@ -31,7 +31,7 @@
     "labels": [],
     "expected": {
       "enabledJobs": ["feelpp","toolboxes"],
-      "targetsList": ["fedora:42","debian:13"]
+      "targetsList": "fedora:42 debian:13"
     }
   },
   {
