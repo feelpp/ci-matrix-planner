@@ -39,5 +39,8 @@ outputs:
   targets_list:
     description: "Space-separated list of targets"
   enabled_jobs:
-    description: space-separated list of jobs that will run    
+    description: space-separated list of jobs that will run
+  raw_message:     { description: "Message used for parsing (debug)" }
+  raw_directives:  { description: "Parsed directives JSON (debug)" }
+  targets_debug:   { description: "Working targets JSON (debug)" }
 
