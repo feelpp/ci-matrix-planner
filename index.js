@@ -3,11 +3,9 @@ const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const { execSync } = require("child_process");
-const core = require("@actions/core");
 
-/* =========================
- * Small helpers
- * ========================= */
+/* ---------------- Utilities ---------------- */
+function env(name, def = "") { return process.env[name] || def; }
 
 function httpGetJson(url, token) {
   return new Promise((resolve, reject) => {
@@ -18,19 +16,16 @@ function httpGetJson(url, token) {
         headers: {
           "User-Agent": "ci-matrix-planner",
           Accept: "application/vnd.github+json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        }
       },
       (res) => {
         let data = "";
         res.on("data", (c) => (data += c));
         res.on("end", () => {
           if (res.statusCode >= 200 && res.statusCode < 300) {
-            try {
-              resolve(JSON.parse(data || "{}"));
-            } catch (e) {
-              reject(new Error(`Invalid JSON from ${url}: ${e.message}`));
-            }
+            try { resolve(JSON.parse(data || "{}")); }
+            catch (e) { reject(new Error(`Invalid JSON from ${url}: ${e.message}`)); }
           } else {
             reject(new Error(`HTTP ${res.statusCode} from ${url}: ${data}`));
           }
@@ -42,17 +37,10 @@ function httpGetJson(url, token) {
   });
 }
 
-function env(name, def = "") {
-  return process.env[name] || def;
-}
-
-/* =========================
- * Pure planner utilities
- * ========================= */
-
 function parseDirectives(msg) {
   const out = {};
   if (!msg) return out;
+  // Look only at simple key=value lines to avoid harvesting list bullets etc.
   const lines = String(msg).split(/\r?\n/);
   for (const ln of lines) {
     const m = ln.match(/^\s*([A-Za-z_]+)\s*=\s*(.+?)\s*$/);
@@ -65,35 +53,32 @@ function parseDirectives(msg) {
   return out;
 }
 
+// Split on commas OR whitespace; trim; drop empties
 function normalizeList(raw) {
   if (!raw) return [];
   return String(raw)
-    .split(/[, \n]+/)
-    .map((s) => s.trim())
+    .split(/[, \t\r\n]+/)
+    .map(s => s.trim())
     .filter(Boolean);
 }
 
 function lowerUnique(list) {
   const seen = new Set();
   const out = [];
-  for (const x of list.map((s) => String(s).toLowerCase())) {
-    if (!seen.has(x)) {
-      seen.add(x);
-      out.push(x);
-    }
+  for (const x of list.map(s => String(s).toLowerCase())) {
+    if (!seen.has(x)) { seen.add(x); out.push(x); }
   }
   return out;
 }
 
+/* ---------------- Planner ---------------- */
 function computePlan(opts) {
-  // opts = { config, message, labels, inputs }
   const cfg = opts.config || {};
   const message = (opts.message || "").trim();
   const labels = lowerUnique(opts.labels || []);
-
   const directives = parseDirectives(message);
 
-  // Mode resolution
+  // Mode
   let mode =
     (opts.inputs && opts.inputs.modeInput) ||
     directives.mode ||
@@ -101,21 +86,19 @@ function computePlan(opts) {
     "components";
   mode = String(mode).toLowerCase();
 
-  // Job universe & defaults
+  // Jobs
   const jobsCfg = cfg.jobs || ["feelpp", "testsuite", "toolboxes", "mor", "python"];
   const defaultJobs = cfg.defaults?.jobs || jobsCfg;
 
-  // Target universe & defaults
-  const targetsCfg =
-    cfg.targets ||
-    ["ubuntu:24.04", "ubuntu:22.04", "debian:13", "debian:12", "fedora:42"];
+  // Targets
+  const targetsCfg = cfg.targets || ["ubuntu:24.04","ubuntu:22.04","debian:13","debian:12","fedora:42"];
   const defaultTargets = cfg.defaults?.targets || targetsCfg;
 
-  // Labels may switch mode (optional)
+  // Labels can switch mode (optional)
   if (labels.includes("ci-mode-full")) mode = "full";
   if (labels.includes("ci-mode-components")) mode = "components";
 
-  // If mode=full, collapse to a single “full” job (e.g., feelpp-spack)
+  // Full vs components
   let enabledJobs;
   if (mode === "full") {
     const fullJob = (cfg.fullBuild && cfg.fullBuild.job) || "feelpp-spack";
@@ -124,32 +107,29 @@ function computePlan(opts) {
     enabledJobs = [...defaultJobs];
   }
 
-  // only / skip job selection
-  const onlyJobs = lowerUnique(
-    normalizeList(directives.only || (cfg.defaults?.onlyJobs || []).join(" "))
-  );
-  const skipJobs = lowerUnique(
-    normalizeList(directives.skip || (cfg.defaults?.skipJobs || []).join(" "))
-  );
+  // only/skip jobs
+  const onlyJobsList = lowerUnique(normalizeList(directives.only || (cfg.defaults?.onlyJobs || []).join(" ")));
+  const skipJobsList = lowerUnique(normalizeList(directives.skip || (cfg.defaults?.skipJobs || []).join(" ")));
 
-  if (onlyJobs.length) {
-    enabledJobs = enabledJobs.filter((j) => onlyJobs.includes(j.toLowerCase()));
+  if (onlyJobsList.length) {
+    enabledJobs = enabledJobs.filter(j => onlyJobsList.includes(j.toLowerCase()));
   }
-  if (skipJobs.length) {
-    enabledJobs = enabledJobs.filter((j) => !skipJobs.includes(j.toLowerCase()));
+  if (skipJobsList.length) {
+    enabledJobs = enabledJobs.filter(j => !skipJobsList.includes(j.toLowerCase()));
   }
 
   // Resolve targets
   let workingTargets = [...defaultTargets];
 
-  // If only= contains platform-like specs (with ":"), treat it as targets filter
-  if (directives.only && directives.only.includes(":")) {
+  // Allow `only=` to carry targets if it contains colon(s) and looks like platforms
+  if (directives.only && /:/.test(directives.only)) {
     workingTargets = normalizeList(directives.only);
   }
 
   if (directives.targets) {
     workingTargets = normalizeList(directives.targets);
   }
+
   if (directives.include) {
     for (const t of normalizeList(directives.include)) {
       if (!workingTargets.includes(t)) workingTargets.push(t);
@@ -157,7 +137,7 @@ function computePlan(opts) {
   }
   if (directives.exclude) {
     const ex = new Set(normalizeList(directives.exclude));
-    workingTargets = workingTargets.filter((t) => !ex.has(t));
+    workingTargets = workingTargets.filter(t => !ex.has(t));
   }
   if (!workingTargets.length) {
     workingTargets = [...defaultTargets];
@@ -166,46 +146,64 @@ function computePlan(opts) {
   return {
     mode,
     enabledJobs,
-    onlyJobs: onlyJobs.join(" "),
-    skipJobs: skipJobs.join(" "),
-    targetsJson: JSON.stringify(workingTargets),
+    onlyJobs: onlyJobsList.join(" "),
+    skipJobs: skipJobsList.join(" "),
     targetsList: workingTargets.join(" "),
+    targetsCsv: workingTargets.join(","),            // NEW: CSV for logging/diagnostics
+    targetsJson: JSON.stringify(workingTargets),     // JSON for matrix
+    debug: {
+      directives,
+      labels,
+      workingTargets
+    },
+    rawMessage: message
   };
 }
 
-/* =========================
- * Action entrypoint
- * ========================= */
-
+/* ---------------- Action entrypoint ---------------- */
 if (require.main === module) {
+  const core = {
+    getInput(name) {
+      return process.env[`INPUT_${name.replace(/ /g, "_").toUpperCase()}`] || "";
+    },
+    setOutput(name, value) {
+      // Always use a delimiter to preserve newlines/quotes safely
+      const delim = `EOF_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      process.stdout.write(`${name}<<${delim}\n${value}\n${delim}\n`);
+    },
+    info: console.log,
+    warn: console.warn,
+  };
+
   (async () => {
     try {
-      // Inputs
-      const configPath      = core.getInput("config-path") || ".github/plan-ci.json";
-      const token           = core.getInput("github-token") || env("GITHUB_TOKEN") || env("GH_TOKEN") || "";
-      const messageOverride = core.getInput("message-override") || "";
-      const labelsOverride  = core.getInput("labels-override") || "";
-      const modeInput       = core.getInput("mode-input") || "";
-
-      // Load optional config
+      // Config
+      const configPath = core.getInput("config-path") || ".github/plan-ci.json";
       let config = {};
       try {
         const cfgText = fs.readFileSync(path.resolve(process.cwd(), configPath), "utf8");
         config = JSON.parse(cfgText);
       } catch (e) {
-        core.warning(`No config at ${configPath}; using defaults. (${e.message})`);
+        core.warn(`No config found at ${configPath}, using defaults. (${e.message})`);
       }
 
-      // Build canonical message + labels
-      let message = messageOverride;
-      let labels = normalizeList(labelsOverride);
+      // Inputs/env
+      const token =
+        core.getInput("github-token") ||
+        env("GITHUB_TOKEN") ||
+        env("GH_TOKEN") ||
+        "";
 
-      const repoFull = env("GITHUB_REPOSITORY"); // owner/repo
-      const [owner, repo] = repoFull ? repoFull.split("/") : ["", ""];
+      const repo = env("GITHUB_REPOSITORY"); // owner/repo
+      const [owner, repoName] = repo ? repo.split("/") : ["", ""];
       const eventPath = env("GITHUB_EVENT_PATH");
       const sha = env("GITHUB_SHA");
 
-      // Prefer PR title/body when available; otherwise push head_commit
+      // Base message
+      let message = core.getInput("message-override") || "";
+      let labels = normalizeList(core.getInput("labels-override"));
+
+      // Try event payload (PR title+body or push head commit)
       if (!message && eventPath && fs.existsSync(eventPath)) {
         try {
           const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
@@ -213,57 +211,58 @@ if (require.main === module) {
             const title = ev.pull_request.title || "";
             const body  = ev.pull_request.body || "";
             message = `${title}\n\n${body}`.trim();
-            labels = (ev.pull_request.labels || [])
-              .map((l) => (l && (l.name || l)) ? String(l.name || l).toLowerCase() : "")
-              .filter(Boolean);
+            labels  = (ev.pull_request.labels || [])
+                        .map(l => (l && (l.name || l)) ? String(l.name || l).toLowerCase() : "")
+                        .filter(Boolean);
           } else if (ev.head_commit && ev.head_commit.message) {
             message = ev.head_commit.message;
           } else if (ev.commits && ev.commits.length) {
             message = ev.commits[ev.commits.length - 1].message || "";
           }
         } catch (e) {
-          core.warning(`Could not parse GITHUB_EVENT_PATH: ${e.message}`);
+          core.warn(`Could not parse GITHUB_EVENT_PATH: ${e.message}`);
         }
       }
 
-      const hasDirective = (txt) =>
-        /\b(only|skip|targets|include|exclude|mode)\s*=/.test(txt || "");
+      const hasDirective = (txt) => /\b(only|skip|targets|include|exclude|mode)\s*=/.test(txt || "");
 
-      // If PR text has no directives, fetch last commit message via API
-      if (!hasDirective(message) && token && owner && repo && eventPath && fs.existsSync(eventPath)) {
+      // Check PR head commit via API if PR text had no directives
+      if (!hasDirective(message) && token && owner && repoName && eventPath && fs.existsSync(eventPath)) {
         try {
           const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
           if (ev.pull_request) {
             const prNumber = ev.pull_request.number;
-            const commits = await httpGetJson(
-              `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits`,
-              token
-            );
-            if (Array.isArray(commits) && commits.length) {
-              const last = commits[commits.length - 1];
-              const commitMsg = last?.commit?.message || "";
-              if (hasDirective(commitMsg)) {
-                message = `${message ? message + "\n\n---\n" : ""}${commitMsg}`;
-                core.info("Planner: directives found in PR head commit via API.");
+            if (prNumber) {
+              const commits = await httpGetJson(
+                `https://api.github.com/repos/${owner}/${repoName}/pulls/${prNumber}/commits`,
+                token
+              );
+              if (Array.isArray(commits) && commits.length) {
+                const last = commits[commits.length - 1];
+                const cm = last?.commit?.message || "";
+                if (hasDirective(cm)) {
+                  message = `${message ? message + "\n\n---\n" : ""}${cm}`;
+                  core.info("Planner: directives found in PR head commit via API.");
+                }
               }
             }
           } else if (sha) {
             const commit = await httpGetJson(
-              `https://api.github.com/repos/${owner}/${repo}/commits/${sha}`,
+              `https://api.github.com/repos/${owner}/${repoName}/commits/${sha}`,
               token
             );
-            const commitMsg = commit?.commit?.message || "";
-            if (hasDirective(commitMsg)) {
-              message = commitMsg;
+            const cm = commit?.commit?.message || "";
+            if (hasDirective(cm)) {
+              message = cm;
               core.info("Planner: directives found in push head commit via API.");
             }
           }
         } catch (e) {
-          core.warning(`Could not fetch commit message via GitHub API: ${e.message}`);
+          core.warn(`Could not fetch commit message via GitHub API: ${e.message}`);
         }
       }
 
-      // Fallback to git log -1 if still no directives and repo is checked out
+      // Fallback to git log -1 (if checkout done)
       if (!hasDirective(message)) {
         try {
           const gitMsg = execSync("git log -1 --pretty=%B", {
@@ -275,40 +274,46 @@ if (require.main === module) {
             message = `${message ? message + "\n\n---\n" : ""}${gitMsg}`;
             core.info("Planner: directives found in latest commit via git log.");
           }
-        } catch {
-          // ignore
-        }
+        } catch {/* ignore */}
       }
 
+      // Plan
       const plan = computePlan({
         config,
         message,
         labels,
-        inputs: { modeInput },
+        inputs: { modeInput: core.getInput("mode-input") }
       });
 
-      // Emit outputs via official SDK (reliable)
+      // Emit outputs (use delimiter blocks to preserve newlines/quotes verbatim)
       core.setOutput("mode", plan.mode);
       core.setOutput("only_jobs", plan.onlyJobs);
       core.setOutput("skip_jobs", plan.skipJobs);
-      core.setOutput("targets_json", plan.targetsJson);
-      core.setOutput("targets_list", plan.targetsList);
+      core.setOutput("targets_json", plan.targetsJson); // valid JSON
+      core.setOutput("targets_list", plan.targetsList); // space-separated
+      core.setOutput("targets_csv", plan.targetsCsv);   // CSV (handy for echo)
       core.setOutput("enabled_jobs", plan.enabledJobs.join(" "));
 
-      // Summary
-      core.info("---- planner summary ----");
-      core.info(`MODE: ${plan.mode}`);
-      core.info(`ENABLED_JOBS: ${plan.enabledJobs.join(" ")}`);
-      core.info(`ONLY_JOBS: ${plan.onlyJobs || "<empty>"}`);
-      core.info(`SKIP_JOBS: ${plan.skipJobs || "<empty>"}`);
-      core.info(`TARGETS_LIST: ${plan.targetsList}`);
-      core.info(`TARGETS_JSON: ${plan.targetsJson}`);
-      core.info("-------------------------");
+      // Diagnostics to help chase parsing problems
+      core.setOutput("raw_message", plan.rawMessage);
+      core.setOutput("raw_directives", JSON.stringify(plan.debug.directives));
+      core.setOutput("targets_debug", JSON.stringify(plan.debug.workingTargets));
+      core.setOutput("targets_len", String(plan.debug.workingTargets.length));
+
+      // Log summary
+      console.log("---- planner summary ----");
+      console.log(`MODE: ${plan.mode}`);
+      console.log(`ENABLED_JOBS: ${plan.enabledJobs.join(" ")}`);
+      console.log(`ONLY_JOBS: ${plan.onlyJobs || "<empty>"}`);
+      console.log(`SKIP_JOBS: ${plan.skipJobs || "<empty>"}`);
+      console.log(`TARGETS_LIST: ${plan.targetsList}`);
+      console.log(`TARGETS_JSON: ${plan.targetsJson}`);
+      console.log("-------------------------");
     } catch (err) {
-      core.setFailed(err instanceof Error ? err.message : String(err));
+      console.error(err);
+      process.exit(1);
     }
   })();
 }
 
-// Export pure utils for unit tests
 module.exports = { computePlan, parseDirectives, normalizeList, lowerUnique };
