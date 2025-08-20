@@ -30,6 +30,7 @@ jobs:
 
       # If you ship a compiled dist/, keep this ON so tests import what the action uses.
       - name: Build
+        shell: bash
         run: |
           npm run build
           if ! git diff --exit-code -- dist; then
