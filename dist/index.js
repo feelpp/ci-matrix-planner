@@ -19825,6 +19825,11 @@ function httpGetJson(url, token) {
     req.end();
   });
 }
+var hasDirective = (txt) => /^\s*(only|skip|targets|include|exclude|mode)\s*=/m.test(txt || "");
+function normalizeList(raw) {
+  if (!raw) return [];
+  return String(raw).split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+}
 function parseDirectives(msg) {
   const out = {};
   if (!msg) return out;
@@ -19834,9 +19839,9 @@ function parseDirectives(msg) {
   }
   return out;
 }
-var normalizeList = (raw) => !raw ? [] : String(raw).split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
-var lowerUnique = (list) => {
-  const seen = /* @__PURE__ */ new Set(), out = [];
+function lowerUnique(list) {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
   for (const x of (list || []).map((s) => String(s).toLowerCase())) {
     if (!seen.has(x)) {
       seen.add(x);
@@ -19844,7 +19849,7 @@ var lowerUnique = (list) => {
     }
   }
   return out;
-};
+}
 function computePlan(opts) {
   const cfg = opts.config || {};
   const message = (opts.message || "").trim();
@@ -19859,10 +19864,18 @@ function computePlan(opts) {
   if (labels.includes("ci-mode-full")) mode = "full";
   if (labels.includes("ci-mode-components")) mode = "components";
   let enabledJobs = mode === "full" ? [cfg.fullBuild && cfg.fullBuild.job || "feelpp-spack"] : [...defaultJobs];
-  const onlyJobs = lowerUnique(normalizeList(directives.only || (cfg.defaults?.onlyJobs || []).join(" ")));
-  const skipJobs = lowerUnique(normalizeList(directives.skip || (cfg.defaults?.skipJobs || []).join(" ")));
-  if (onlyJobs.length) enabledJobs = enabledJobs.filter((j) => onlyJobs.includes(j.toLowerCase()));
-  if (skipJobs.length) enabledJobs = enabledJobs.filter((j) => !skipJobs.includes(j.toLowerCase()));
+  const onlyJobsList = lowerUnique(
+    normalizeList(directives.only || (cfg.defaults?.onlyJobs || []).join(" "))
+  );
+  const skipJobsList = lowerUnique(
+    normalizeList(directives.skip || (cfg.defaults?.skipJobs || []).join(" "))
+  );
+  if (onlyJobsList.length) {
+    enabledJobs = enabledJobs.filter((j) => onlyJobsList.includes(j.toLowerCase()));
+  }
+  if (skipJobsList.length) {
+    enabledJobs = enabledJobs.filter((j) => !skipJobsList.includes(j.toLowerCase()));
+  }
   let workingTargets = [...defaultTargets];
   if (directives.only && directives.only.includes(":")) {
     workingTargets = normalizeList(directives.only);
@@ -19883,132 +19896,137 @@ function computePlan(opts) {
   return {
     mode,
     enabledJobs,
-    onlyJobs: onlyJobs.join(" "),
-    skipJobs: skipJobs.join(" "),
+    onlyJobs: onlyJobsList.join(" "),
+    skipJobs: skipJobsList.join(" "),
     targetsList: workingTargets.join(" "),
     targetsJson: JSON.stringify(workingTargets),
-    // debug
     rawMessage: message,
     debug: { directives, labels, workingTargets }
   };
 }
-if (require.main === module) {
-  (async () => {
+async function harvestMessage({ token, owner, repo, eventPath, sha }) {
+  let message = core.getInput("message-override") || "";
+  let labels = normalizeList(core.getInput("labels-override") || "");
+  if (!message && eventPath && fs.existsSync(eventPath)) {
     try {
-      const configPath = core.getInput("config-path") || ".github/plan-ci.json";
-      const token = core.getInput("github-token") || env("GITHUB_TOKEN") || env("GH_TOKEN") || "";
-      const messageOverride = core.getInput("message-override") || "";
-      const labelsOverride = core.getInput("labels-override") || "";
-      const modeInput = core.getInput("mode-input") || "";
-      let config = {};
-      try {
-        const t = fs.readFileSync(path.resolve(process.cwd(), configPath), "utf8");
-        config = JSON.parse(t);
-      } catch (e) {
-        core.warning(`No config at ${configPath}; using defaults. (${e.message})`);
-      }
-      let message = messageOverride;
-      let labels = normalizeList(labelsOverride);
-      const repoFull = env("GITHUB_REPOSITORY");
-      const [owner, repo] = repoFull ? repoFull.split("/") : ["", ""];
-      const eventPath = env("GITHUB_EVENT_PATH");
-      const sha = env("GITHUB_SHA");
-      if (!message && eventPath && fs.existsSync(eventPath)) {
-        try {
-          const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
-          if (ev.pull_request) {
-            const title = ev.pull_request.title || "";
-            const body = ev.pull_request.body || "";
-            message = `${title}
+      const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+      if (ev.pull_request) {
+        const title = ev.pull_request.title || "";
+        const body = ev.pull_request.body || "";
+        message = `${title}
 
 ${body}`.trim();
-            labels = (ev.pull_request.labels || []).map((l) => l && (l.name || l) ? String(l.name || l).toLowerCase() : "").filter(Boolean);
-          } else if (ev.head_commit?.message) {
-            message = ev.head_commit.message;
-          } else if (Array.isArray(ev.commits) && ev.commits.length) {
-            message = ev.commits[ev.commits.length - 1].message || "";
-          }
-        } catch (e) {
-          core.warning(`Could not parse GITHUB_EVENT_PATH: ${e.message}`);
-        }
+        labels = (ev.pull_request.labels || []).map((l) => l && (l.name || l) ? String(l.name || l).toLowerCase() : "").filter(Boolean);
+      } else if (ev.head_commit?.message) {
+        message = ev.head_commit.message;
+      } else if (Array.isArray(ev.commits) && ev.commits.length) {
+        message = ev.commits[ev.commits.length - 1].message || "";
       }
-      const hasDirective = (txt) => /\b(only|skip|targets|include|exclude|mode)\s*=/.test(txt || "");
-      if (!hasDirective(message) && token && owner && repo && eventPath && fs.existsSync(eventPath)) {
-        try {
-          const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
-          if (ev.pull_request) {
-            const prNumber = ev.pull_request.number;
-            if (prNumber) {
-              const commits = await httpGetJson(
-                `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits`,
-                token
-              );
-              if (Array.isArray(commits) && commits.length) {
-                const last = commits[commits.length - 1];
-                const cm = last?.commit?.message || "";
-                if (hasDirective(cm)) {
-                  message = `${message ? message + "\n\n---\n" : ""}${cm}`;
-                  core.info("Planner: directives found in PR head commit via API.");
-                }
-              }
-            }
-          } else if (sha) {
-            const commit = await httpGetJson(
-              `https://api.github.com/repos/${owner}/${repo}/commits/${sha}`,
-              token
-            );
-            const cm = commit?.commit?.message || "";
+    } catch (e) {
+      core.warning(`Could not parse GITHUB_EVENT_PATH: ${e.message}`);
+    }
+  }
+  if (!hasDirective(message) && token && owner && repo && eventPath && fs.existsSync(eventPath)) {
+    try {
+      const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+      if (ev.pull_request?.number) {
+        const prNumber = ev.pull_request.number;
+        const commits = await httpGetJson(
+          `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits`,
+          token
+        );
+        if (Array.isArray(commits) && commits.length) {
+          for (let i = commits.length - 1; i >= 0; i--) {
+            const cm = commits[i]?.commit?.message || "";
             if (hasDirective(cm)) {
               message = cm;
-              core.info("Planner: directives found in push head commit via API.");
+              core.info(`Planner: directives taken from PR commit ${i + 1}/${commits.length}.`);
+              break;
             }
           }
-        } catch (e) {
-          core.warning(`Could not fetch commit message via GitHub API: ${e.message}`);
+        }
+      } else if (sha) {
+        const commit = await httpGetJson(
+          `https://api.github.com/repos/${owner}/${repo}/commits/${sha}`,
+          token
+        );
+        const cm = commit?.commit?.message || "";
+        if (hasDirective(cm)) {
+          message = cm;
+          core.info("Planner: directives found in push head commit via API.");
         }
       }
-      if (!hasDirective(message)) {
-        try {
-          const gitMsg = execSync("git log -1 --pretty=%B", {
-            cwd: env("GITHUB_WORKSPACE") || process.cwd(),
-            stdio: ["ignore", "pipe", "ignore"],
-            encoding: "utf8"
-          }).trim();
-          if (hasDirective(gitMsg)) {
-            message = `${message ? message + "\n\n---\n" : ""}${gitMsg}`;
-            core.info("Planner: directives found via git log.");
-          }
-        } catch {
-        }
-      }
-      const plan = computePlan({
-        config,
-        message,
-        labels,
-        inputs: { modeInput }
-      });
-      core.setOutput("mode", plan.mode);
-      core.setOutput("only_jobs", plan.onlyJobs);
-      core.setOutput("skip_jobs", plan.skipJobs);
-      core.setOutput("targets_json", plan.targetsJson);
-      core.setOutput("targets_list", plan.targetsList);
-      core.setOutput("enabled_jobs", plan.enabledJobs.join(" "));
-      core.setOutput("raw_message", plan.rawMessage);
-      core.setOutput("raw_directives", JSON.stringify(plan.debug.directives));
-      core.setOutput("targets_debug", JSON.stringify(plan.debug.workingTargets));
-      core.startGroup("planner summary");
-      core.info(`MODE: ${plan.mode}`);
-      core.info(`ENABLED_JOBS: ${plan.enabledJobs.join(" ")}`);
-      core.info(`ONLY_JOBS: ${plan.onlyJobs || "<empty>"}`);
-      core.info(`SKIP_JOBS: ${plan.skipJobs || "<empty>"}`);
-      core.info(`TARGETS_LIST: ${plan.targetsList}`);
-      core.info(`TARGETS_JSON: ${plan.targetsJson}`);
-      core.endGroup();
-    } catch (err) {
-      core.setFailed(err instanceof Error ? err.message : String(err));
+    } catch (e) {
+      core.warning(`Could not fetch commits via API: ${e.message}`);
     }
-  })();
+  }
+  if (!hasDirective(message)) {
+    try {
+      const gitMsg = execSync("git log -1 --pretty=%B", {
+        cwd: env("GITHUB_WORKSPACE") || process.cwd(),
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8"
+      }).trim();
+      if (hasDirective(gitMsg)) {
+        message = gitMsg;
+        core.info("Planner: directives found via git log.");
+      }
+    } catch {
+    }
+  }
+  return { message, labels };
 }
+async function run() {
+  try {
+    const configPath = core.getInput("config-path") || ".github/plan-ci.json";
+    const token = core.getInput("github-token") || env("GITHUB_TOKEN") || env("GH_TOKEN") || "";
+    const modeInput = core.getInput("mode-input") || "";
+    let config = {};
+    try {
+      const t = fs.readFileSync(path.resolve(process.cwd(), configPath), "utf8");
+      config = JSON.parse(t);
+    } catch (e) {
+      core.warning(`No config at ${configPath}; using defaults. (${e.message})`);
+    }
+    const repoFull = env("GITHUB_REPOSITORY");
+    const [owner, repo] = repoFull ? repoFull.split("/") : ["", ""];
+    const eventPath = env("GITHUB_EVENT_PATH");
+    const sha = env("GITHUB_SHA");
+    const { message, labels } = await harvestMessage({
+      token,
+      owner,
+      repo,
+      eventPath,
+      sha
+    });
+    const plan = computePlan({
+      config,
+      message,
+      labels,
+      inputs: { modeInput }
+    });
+    core.setOutput("mode", plan.mode);
+    core.setOutput("only_jobs", plan.onlyJobs);
+    core.setOutput("skip_jobs", plan.skipJobs);
+    core.setOutput("targets_json", plan.targetsJson);
+    core.setOutput("targets_list", plan.targetsList);
+    core.setOutput("enabled_jobs", plan.enabledJobs.join(" "));
+    core.setOutput("raw_message", plan.rawMessage || message || "");
+    core.setOutput("raw_directives", JSON.stringify(plan.debug?.directives || {}));
+    core.setOutput("targets_debug", JSON.stringify(plan.debug?.workingTargets || []));
+    core.startGroup("planner summary");
+    core.info(`MODE: ${plan.mode}`);
+    core.info(`ENABLED_JOBS: ${plan.enabledJobs.join(" ")}`);
+    core.info(`ONLY_JOBS: ${plan.onlyJobs || "<empty>"}`);
+    core.info(`SKIP_JOBS: ${plan.skipJobs || "<empty>"}`);
+    core.info(`TARGETS_LIST: ${plan.targetsList}`);
+    core.info(`TARGETS_JSON: ${plan.targetsJson}`);
+    core.endGroup();
+  } catch (err) {
+    core.setFailed(err instanceof Error ? err.message : String(err));
+  }
+}
+if (require.main === module) run();
 module.exports = { computePlan, parseDirectives, normalizeList, lowerUnique };
 /*! Bundled license information:
 
