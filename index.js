@@ -1,5 +1,12 @@
 // index.js
-// CI Matrix Planner — robust PR/commit directive parsing with @actions/core outputs
+// CI Matrix Planner — parse key=value directives from PRs / commits
+// Precedence (highest → lowest):
+//  1) message-override (input)
+//  2) PR head commit (latest commit in PR)
+//  3) PR title/body (as defaults)
+//  4) push head commit (for push events)
+//  5) git log -1 (if checkout exists)
+// If no directives found → fall back to plan-ci.json defaults via computePlan().
 
 const fs = require("fs");
 const path = require("path");
@@ -46,11 +53,11 @@ function httpGetJson(url, token) {
   });
 }
 
-// STRICT match: line that *starts* with key = value (multiline)
+// strict detector: key=value at start of a line (multiline)
 const hasDirective = (txt) =>
   /^\s*(only|skip|targets|include|exclude|mode)\s*=/m.test(txt || "");
 
-// Split on commas and/or whitespace; trim; drop empties
+// split list on commas and/or whitespace; trim; drop empties
 function normalizeList(raw) {
   if (!raw) return [];
   return String(raw)
@@ -59,7 +66,7 @@ function normalizeList(raw) {
     .filter(Boolean);
 }
 
-// Accept only simple key=value lines (ignore bullets, Markdown, etc.)
+// only accept simple key=value lines (ignore bullets, Markdown, etc.)
 function parseDirectives(msg) {
   const out = {};
   if (!msg) return out;
@@ -80,6 +87,14 @@ function lowerUnique(list) {
     }
   }
   return out;
+}
+
+function extractDirectiveLines(txt) {
+  if (!txt) return [];
+  return String(txt)
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter((l) => /^\s*(only|skip|targets|include|exclude|mode)\s*=/.test(l));
 }
 
 /* =========================
@@ -109,7 +124,7 @@ function computePlan(opts) {
     cfg.targets || ["ubuntu:24.04", "ubuntu:22.04", "debian:13", "debian:12", "fedora:42"];
   const defaultTargets = cfg.defaults?.targets || targetsCfg;
 
-  // Labels can switch mode
+  // Labels can switch mode (optional)
   if (labels.includes("ci-mode-full")) mode = "full";
   if (labels.includes("ci-mode-components")) mode = "components";
 
@@ -119,7 +134,7 @@ function computePlan(opts) {
       ? [(cfg.fullBuild && cfg.fullBuild.job) || "feelpp-spack"]
       : [...defaultJobs];
 
-  // only/skip job filters
+  // only / skip jobs (from directives)
   const onlyJobsList = lowerUnique(
     normalizeList(directives.only || (cfg.defaults?.onlyJobs || []).join(" "))
   );
@@ -137,7 +152,7 @@ function computePlan(opts) {
   // Resolve targets
   let workingTargets = [...defaultTargets];
 
-  // Allow only= to carry platforms if it contains ':'
+  // allow only= to carry platforms if it contains ':'
   if (directives.only && directives.only.includes(":")) {
     workingTargets = normalizeList(directives.only);
   }
@@ -168,89 +183,113 @@ function computePlan(opts) {
 }
 
 /* =========================
- * Message harvesting
- * ========================= */
+ * Harvest message with PR defaults
+ * =========================
+ * Precedence:
+ *  1) override
+ *  2) PR head commit (latest)
+ *  3) PR title/body (defaults)
+ *  4) push head commit
+ *  5) git log -1
+ */
+async function harvestLatestWithPRDefaults({ token, owner, repo, eventPath, sha }) {
+  // 0) override
+  const override = core.getInput("message-override") || "";
+  if (hasDirective(override)) {
+    return {
+      effectiveMessage: override.trim(),
+      prBodyDefaultsMessage: "",
+      headCommitMessage: override.trim(),
+      source: "override",
+    };
+  }
 
-async function harvestMessage({ token, owner, repo, eventPath, sha }) {
-  // 0) Start from overrides (if any)
-  let message = core.getInput("message-override") || "";
-  let labels = normalizeList(core.getInput("labels-override") || "");
+  let prBodyDefaults = "";
+  let headCommitMsg = "";
+  let source = "none";
+  let prNumber = null;
 
-  // 1) Event payload — PR title/body or push head commit
-  if (!message && eventPath && fs.existsSync(eventPath)) {
+  // read event payload (PR defaults and PR number)
+  if (eventPath && fs.existsSync(eventPath)) {
     try {
       const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
       if (ev.pull_request) {
+        prNumber = ev.pull_request.number || null;
         const title = ev.pull_request.title || "";
         const body = ev.pull_request.body || "";
-        message = `${title}\n\n${body}`.trim();
-        labels = (ev.pull_request.labels || [])
-          .map((l) => (l && (l.name || l)) ? String(l.name || l).toLowerCase() : "")
-          .filter(Boolean);
-      } else if (ev.head_commit?.message) {
-        message = ev.head_commit.message;
-      } else if (Array.isArray(ev.commits) && ev.commits.length) {
-        message = ev.commits[ev.commits.length - 1].message || "";
+        const defaultsLines = extractDirectiveLines(`${title}\n\n${body}`);
+        if (defaultsLines.length) {
+          prBodyDefaults = defaultsLines.join("\n");
+          source = "pr-body-defaults";
+        }
       }
     } catch (e) {
       core.warning(`Could not parse GITHUB_EVENT_PATH: ${e.message}`);
     }
   }
 
-  // 2) If PR text has no directives, scan PR commits (newest → oldest) via API
-  if (!hasDirective(message) && token && owner && repo && eventPath && fs.existsSync(eventPath)) {
+  // prefer PR head commit (latest in PR)
+  if (token && owner && repo && prNumber) {
     try {
-      const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
-      if (ev.pull_request?.number) {
-        const prNumber = ev.pull_request.number;
-        const commits = await httpGetJson(
-          `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits`,
-          token
-        );
-        if (Array.isArray(commits) && commits.length) {
-          for (let i = commits.length - 1; i >= 0; i--) {
-            const cm = commits[i]?.commit?.message || "";
-            if (hasDirective(cm)) {
-              message = cm;
-              core.info(`Planner: directives taken from PR commit ${i + 1}/${commits.length}.`);
-              break;
-            }
-          }
-        }
-      } else if (sha) {
-        const commit = await httpGetJson(
-          `https://api.github.com/repos/${owner}/${repo}/commits/${sha}`,
-          token
-        );
-        const cm = commit?.commit?.message || "";
-        if (hasDirective(cm)) {
-          message = cm;
-          core.info("Planner: directives found in push head commit via API.");
-        }
+      const commits = await httpGetJson(
+        `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits`,
+        token
+      );
+      if (Array.isArray(commits) && commits.length) {
+        const head = commits[commits.length - 1];
+        headCommitMsg = (head?.commit?.message || "").trim();
+        if (hasDirective(headCommitMsg)) source = "pr-head-commit";
       }
     } catch (e) {
-      core.warning(`Could not fetch commits via API: ${e.message}`);
+      core.warning(`PR head commit fetch failed: ${e.message}`);
     }
   }
 
-  // 3) Fallback to git log -1 (requires checkout) if still nothing
-  if (!hasDirective(message)) {
+  // push head commit (if not PR)
+  if (!headCommitMsg && token && owner && repo && sha) {
     try {
-      const gitMsg = execSync("git log -1 --pretty=%B", {
-        cwd: env("GITHUB_WORKSPACE") || process.cwd(),
+      const commit = await httpGetJson(
+        `https://api.github.com/repos/${owner}/${repo}/commits/${sha}`,
+        token
+      );
+      headCommitMsg = (commit?.commit?.message || "").trim();
+      if (hasDirective(headCommitMsg)) source = "push-head-commit";
+    } catch (e) {
+      core.warning(`Push head commit fetch failed: ${e.message}`);
+    }
+  }
+
+  // git fallback
+  if (!headCommitMsg) {
+    try {
+      const m = execSync("git log -1 --pretty=%B", {
+        cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
         stdio: ["ignore", "pipe", "ignore"],
         encoding: "utf8",
       }).trim();
-      if (hasDirective(gitMsg)) {
-        message = gitMsg;
-        core.info("Planner: directives found via git log.");
-      }
+      headCommitMsg = m;
+      if (hasDirective(headCommitMsg) && source === "none") source = "git-log";
     } catch {
-      // ignore
+      /* ignore */
     }
   }
 
-  return { message, labels };
+  // Merge defaults (PR body) with head commit — latest wins
+  const defaultsObj = parseDirectives(prBodyDefaults);
+  const headObj = parseDirectives(headCommitMsg);
+  const merged = { ...defaultsObj, ...headObj };
+
+  const effectiveMessage = Object.entries(merged)
+    .map(([k, v]) => `${k}=${v}`)
+    .join("\n")
+    .trim();
+
+  return {
+    effectiveMessage,
+    prBodyDefaultsMessage: prBodyDefaults,
+    headCommitMessage: headCommitMsg,
+    source,
+  };
 }
 
 /* =========================
@@ -263,8 +302,9 @@ async function run() {
     const token =
       core.getInput("github-token") || env("GITHUB_TOKEN") || env("GH_TOKEN") || "";
     const modeInput = core.getInput("mode-input") || "";
+    const labelsOverride = normalizeList(core.getInput("labels-override") || "");
 
-    // Load config
+    // load config
     let config = {};
     try {
       const t = fs.readFileSync(path.resolve(process.cwd(), configPath), "utf8");
@@ -278,37 +318,40 @@ async function run() {
     const eventPath = env("GITHUB_EVENT_PATH");
     const sha = env("GITHUB_SHA");
 
-    // Get message (PR/commit) and labels
-    const { message, labels } = await harvestMessage({
-      token,
-      owner,
-      repo,
-      eventPath,
-      sha,
-    });
+    // harvest directives
+    const {
+      effectiveMessage,
+      prBodyDefaultsMessage,
+      headCommitMessage,
+      source,
+    } = await harvestLatestWithPRDefaults({ token, owner, repo, eventPath, sha });
 
-    // Compute plan
+    // compute plan (falls back to config defaults if effectiveMessage is empty)
     const plan = computePlan({
       config,
-      message,
-      labels,
+      message: effectiveMessage,
+      labels: labelsOverride,
       inputs: { modeInput },
     });
 
-    // Outputs (official SDK)
+    // outputs
     core.setOutput("mode", plan.mode);
     core.setOutput("only_jobs", plan.onlyJobs);
     core.setOutput("skip_jobs", plan.skipJobs);
-    core.setOutput("targets_json", plan.targetsJson); // use fromJson(...) in matrix
-    core.setOutput("targets_list", plan.targetsList); // logging convenience
+    core.setOutput("targets_json", plan.targetsJson);
+    core.setOutput("targets_list", plan.targetsList);
     core.setOutput("enabled_jobs", plan.enabledJobs.join(" "));
-    // Debug outputs
-    core.setOutput("raw_message", plan.rawMessage || message || "");
-    core.setOutput("raw_directives", JSON.stringify(plan.debug?.directives || {}));
-    core.setOutput("targets_debug", JSON.stringify(plan.debug?.workingTargets || []));
 
-    // Summary in logs
+    // debug
+    core.setOutput("directive_source", source);
+    core.setOutput("raw_message", plan.rawMessage || effectiveMessage || "");
+    core.setOutput("raw_directives", JSON.stringify(plan.debug?.directives || {}));
+    core.setOutput("raw_pr_body_defaults", prBodyDefaultsMessage || "");
+    core.setOutput("raw_head_commit", headCommitMessage || "");
+
+    // summary
     core.startGroup("planner summary");
+    core.info(`SOURCE: ${source}`);
     core.info(`MODE: ${plan.mode}`);
     core.info(`ENABLED_JOBS: ${plan.enabledJobs.join(" ")}`);
     core.info(`ONLY_JOBS: ${plan.onlyJobs || "<empty>"}`);
@@ -323,4 +366,12 @@ async function run() {
 
 if (require.main === module) run();
 
-module.exports = { computePlan, parseDirectives, normalizeList, lowerUnique };
+module.exports = {
+  computePlan,
+  parseDirectives,
+  normalizeList,
+  lowerUnique,
+  // exported in case you want to unit test harvesting separately later
+  hasDirective,
+  extractDirectiveLines,
+};
