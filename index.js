@@ -1,9 +1,10 @@
 // index.js
-// CI Matrix Planner — parse key=value directives from the *latest* commit only
+// CI Matrix Planner — parse key=value directives from the *latest commit only*
+//
 // Precedence (highest → lowest):
 //  1) message-override (input)
-//  2) PR head commit (latest commit in PR, via API)
-//  3) push head commit (via API)
+//  2) PR head commit (context.payload.pull_request.head.sha via API)
+//  3) push head commit (GITHUB_SHA via API)
 //  4) git log -1 (if checkout exists)
 // If no directives found → computePlan() falls back to plan-ci.json defaults.
 
@@ -36,11 +37,8 @@ function httpGetJson(url, token) {
         res.on("data", (c) => (data += c));
         res.on("end", () => {
           if (res.statusCode >= 200 && res.statusCode < 300) {
-            try {
-              resolve(JSON.parse(data || "{}"));
-            } catch (e) {
-              reject(new Error(`Invalid JSON from ${url}: ${e.message}`));
-            }
+            try { resolve(JSON.parse(data || "{}")); }
+            catch (e) { reject(new Error(`Invalid JSON from ${url}: ${e.message}`)); }
           } else {
             reject(new Error(`HTTP ${res.statusCode} from ${url}: ${data}`));
           }
@@ -65,7 +63,7 @@ function normalizeList(raw) {
     .filter(Boolean);
 }
 
-// only accept simple key=value lines (ignore bullets, Markdown, etc.)
+// accept only simple key=value lines (ignore bullets, Markdown, etc.)
 function parseDirectives(msg) {
   const out = {};
   if (!msg) return out;
@@ -80,10 +78,7 @@ function lowerUnique(list) {
   const seen = new Set();
   const out = [];
   for (const x of (list || []).map((s) => String(s).toLowerCase())) {
-    if (!seen.has(x)) {
-      seen.add(x);
-      out.push(x);
-    }
+    if (!seen.has(x)) { seen.add(x); out.push(x); }
   }
   return out;
 }
@@ -178,7 +173,7 @@ function computePlan(opts) {
  * =========================
  * Precedence:
  *  1) override
- *  2) PR head commit (latest)
+ *  2) PR head commit (via PR head SHA)
  *  3) push head commit
  *  4) git log -1
  */
@@ -186,31 +181,28 @@ async function harvestMessageLatestOnly({ token, owner, repo, eventPath, sha }) 
   // 0) override
   const override = core.getInput("message-override") || "";
   if (hasDirective(override)) {
-    return { message: override.trim(), source: "override" };
+    return { message: override.trim(), source: "override", headSha: null };
   }
 
-  // 1) PR head commit (latest) via API
+  // 1) PR head commit by head SHA (most reliable, 1 call)
   if (token && owner && repo && eventPath && fs.existsSync(eventPath)) {
     try {
       const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
-      if (ev.pull_request?.number) {
-        const prNumber = ev.pull_request.number;
-        const commits = await httpGetJson(
-          `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits`,
+      const headSha = ev?.pull_request?.head?.sha;
+      if (headSha) {
+        const commit = await httpGetJson(
+          `https://api.github.com/repos/${owner}/${repo}/commits/${headSha}`,
           token
         );
-        if (Array.isArray(commits) && commits.length) {
-          const head = commits[commits.length - 1];
-          const msg = (head?.commit?.message || "").trim();
-          return { message: msg, source: "pr-head-commit" };
-        }
+        const msg = (commit?.commit?.message || "").trim();
+        return { message: msg, source: "pr-head-commit", headSha };
       }
     } catch (e) {
-      core.warning(`PR head commit fetch failed: ${e.message}`);
+      core.warning(`PR head commit fetch (by head.sha) failed: ${e.message}`);
     }
   }
 
-  // 2) Push head commit via API
+  // 2) Push head commit (API)
   if (token && owner && repo && sha) {
     try {
       const commit = await httpGetJson(
@@ -218,26 +210,24 @@ async function harvestMessageLatestOnly({ token, owner, repo, eventPath, sha }) 
         token
       );
       const msg = (commit?.commit?.message || "").trim();
-      return { message: msg, source: "push-head-commit" };
+      return { message: msg, source: "push-head-commit", headSha: sha };
     } catch (e) {
       core.warning(`Push head commit fetch failed: ${e.message}`);
     }
   }
 
-  // 3) git log -1 (if checkout present)
+  // 3) git log -1 (fallback if checkout present)
   try {
     const msg = execSync("git log -1 --pretty=%B", {
-      cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
+      cwd: env("GITHUB_WORKSPACE") || process.cwd(),
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf8",
     }).trim();
-    return { message: msg, source: "git-log" };
-  } catch {
-    /* ignore */
-  }
+    return { message: msg, source: "git-log", headSha: null };
+  } catch { /* ignore */ }
 
-  // 4) nothing
-  return { message: "", source: "none" };
+  // 4) none
+  return { message: "", source: "none", headSha: null };
 }
 
 /* =========================
@@ -267,7 +257,7 @@ async function run() {
     const sha = env("GITHUB_SHA");
 
     // harvest latest-only
-    const { message, source } = await harvestMessageLatestOnly({
+    const { message, source, headSha } = await harvestMessageLatestOnly({
       token,
       owner,
       repo,
@@ -293,12 +283,14 @@ async function run() {
 
     // debug
     core.setOutput("directive_source", source);
+    core.setOutput("head_commit_sha", headSha || "");
     core.setOutput("raw_message", plan.rawMessage || message || "");
     core.setOutput("raw_directives", JSON.stringify(plan.debug?.directives || {}));
 
     // summary
     core.startGroup("planner summary");
     core.info(`SOURCE: ${source}`);
+    if (headSha) core.info(`HEAD_SHA: ${headSha}`);
     core.info(`MODE: ${plan.mode}`);
     core.info(`ENABLED_JOBS: ${plan.enabledJobs.join(" ")}`);
     core.info(`ONLY_JOBS: ${plan.onlyJobs || "<empty>"}`);
@@ -307,7 +299,6 @@ async function run() {
     core.info(`TARGETS_JSON: ${plan.targetsJson}`);
     core.info(`RAW_MESSAGE: ${plan.rawMessage || "<empty>"}`);
     core.info(`RAW_DIRECTIVES: ${JSON.stringify(plan.debug?.directives || {})}`);
-
     core.endGroup();
   } catch (err) {
     core.setFailed(err instanceof Error ? err.message : String(err));

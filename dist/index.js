@@ -19907,25 +19907,22 @@ function computePlan(opts) {
 async function harvestMessageLatestOnly({ token, owner, repo, eventPath, sha }) {
   const override = core.getInput("message-override") || "";
   if (hasDirective(override)) {
-    return { message: override.trim(), source: "override" };
+    return { message: override.trim(), source: "override", headSha: null };
   }
   if (token && owner && repo && eventPath && fs.existsSync(eventPath)) {
     try {
       const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
-      if (ev.pull_request?.number) {
-        const prNumber = ev.pull_request.number;
-        const commits = await httpGetJson(
-          `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits`,
+      const headSha = ev?.pull_request?.head?.sha;
+      if (headSha) {
+        const commit = await httpGetJson(
+          `https://api.github.com/repos/${owner}/${repo}/commits/${headSha}`,
           token
         );
-        if (Array.isArray(commits) && commits.length) {
-          const head = commits[commits.length - 1];
-          const msg = (head?.commit?.message || "").trim();
-          return { message: msg, source: "pr-head-commit" };
-        }
+        const msg = (commit?.commit?.message || "").trim();
+        return { message: msg, source: "pr-head-commit", headSha };
       }
     } catch (e) {
-      core.warning(`PR head commit fetch failed: ${e.message}`);
+      core.warning(`PR head commit fetch (by head.sha) failed: ${e.message}`);
     }
   }
   if (token && owner && repo && sha) {
@@ -19935,21 +19932,21 @@ async function harvestMessageLatestOnly({ token, owner, repo, eventPath, sha }) 
         token
       );
       const msg = (commit?.commit?.message || "").trim();
-      return { message: msg, source: "push-head-commit" };
+      return { message: msg, source: "push-head-commit", headSha: sha };
     } catch (e) {
       core.warning(`Push head commit fetch failed: ${e.message}`);
     }
   }
   try {
     const msg = execSync("git log -1 --pretty=%B", {
-      cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
+      cwd: env("GITHUB_WORKSPACE") || process.cwd(),
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf8"
     }).trim();
-    return { message: msg, source: "git-log" };
+    return { message: msg, source: "git-log", headSha: null };
   } catch {
   }
-  return { message: "", source: "none" };
+  return { message: "", source: "none", headSha: null };
 }
 async function run() {
   try {
@@ -19968,7 +19965,7 @@ async function run() {
     const [owner, repo] = repoFull ? repoFull.split("/") : ["", ""];
     const eventPath = env("GITHUB_EVENT_PATH");
     const sha = env("GITHUB_SHA");
-    const { message, source } = await harvestMessageLatestOnly({
+    const { message, source, headSha } = await harvestMessageLatestOnly({
       token,
       owner,
       repo,
@@ -19988,10 +19985,12 @@ async function run() {
     core.setOutput("targets_list", plan.targetsList);
     core.setOutput("enabled_jobs", plan.enabledJobs.join(" "));
     core.setOutput("directive_source", source);
+    core.setOutput("head_commit_sha", headSha || "");
     core.setOutput("raw_message", plan.rawMessage || message || "");
     core.setOutput("raw_directives", JSON.stringify(plan.debug?.directives || {}));
     core.startGroup("planner summary");
     core.info(`SOURCE: ${source}`);
+    if (headSha) core.info(`HEAD_SHA: ${headSha}`);
     core.info(`MODE: ${plan.mode}`);
     core.info(`ENABLED_JOBS: ${plan.enabledJobs.join(" ")}`);
     core.info(`ONLY_JOBS: ${plan.onlyJobs || "<empty>"}`);
