@@ -305,6 +305,9 @@ async function run() {
     core.info(`SKIP_JOBS: ${plan.skipJobs || "<empty>"}`);
     core.info(`TARGETS_LIST: ${plan.targetsList}`);
     core.info(`TARGETS_JSON: ${plan.targetsJson}`);
+    core.info(`RAW_MESSAGE: ${plan.rawMessage || "<empty>"}`);
+    core.info(`RAW_DIRECTIVES: ${JSON.stringify(plan.debug?.directives || {})}`);
+
     core.endGroup();
   } catch (err) {
     core.setFailed(err instanceof Error ? err.message : String(err));
