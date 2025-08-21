@@ -19850,10 +19850,6 @@ function lowerUnique(list) {
   }
   return out;
 }
-function extractDirectiveLines(txt) {
-  if (!txt) return [];
-  return String(txt).split(/\r?\n/).map((s) => s.trim()).filter((l) => /^\s*(only|skip|targets|include|exclude|mode)\s*=/.test(l));
-}
 function computePlan(opts) {
   const cfg = opts.config || {};
   const message = (opts.message || "").trim();
@@ -19908,88 +19904,52 @@ function computePlan(opts) {
     debug: { directives, labels, workingTargets }
   };
 }
-async function harvestLatestWithPRDefaults({ token, owner, repo, eventPath, sha }) {
+async function harvestMessageLatestOnly({ token, owner, repo, eventPath, sha }) {
   const override = core.getInput("message-override") || "";
   if (hasDirective(override)) {
-    return {
-      effectiveMessage: override.trim(),
-      prBodyDefaultsMessage: "",
-      headCommitMessage: override.trim(),
-      source: "override"
-    };
+    return { message: override.trim(), source: "override" };
   }
-  let prBodyDefaults = "";
-  let headCommitMsg = "";
-  let source = "none";
-  let prNumber = null;
-  if (eventPath && fs.existsSync(eventPath)) {
+  if (token && owner && repo && eventPath && fs.existsSync(eventPath)) {
     try {
       const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
-      if (ev.pull_request) {
-        prNumber = ev.pull_request.number || null;
-        const title = ev.pull_request.title || "";
-        const body = ev.pull_request.body || "";
-        const defaultsLines = extractDirectiveLines(`${title}
-
-${body}`);
-        if (defaultsLines.length) {
-          prBodyDefaults = defaultsLines.join("\n");
-          source = "pr-body-defaults";
+      if (ev.pull_request?.number) {
+        const prNumber = ev.pull_request.number;
+        const commits = await httpGetJson(
+          `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits`,
+          token
+        );
+        if (Array.isArray(commits) && commits.length) {
+          const head = commits[commits.length - 1];
+          const msg = (head?.commit?.message || "").trim();
+          return { message: msg, source: "pr-head-commit" };
         }
-      }
-    } catch (e) {
-      core.warning(`Could not parse GITHUB_EVENT_PATH: ${e.message}`);
-    }
-  }
-  if (token && owner && repo && prNumber) {
-    try {
-      const commits = await httpGetJson(
-        `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/commits`,
-        token
-      );
-      if (Array.isArray(commits) && commits.length) {
-        const head = commits[commits.length - 1];
-        headCommitMsg = (head?.commit?.message || "").trim();
-        if (hasDirective(headCommitMsg)) source = "pr-head-commit";
       }
     } catch (e) {
       core.warning(`PR head commit fetch failed: ${e.message}`);
     }
   }
-  if (!headCommitMsg && token && owner && repo && sha) {
+  if (token && owner && repo && sha) {
     try {
       const commit = await httpGetJson(
         `https://api.github.com/repos/${owner}/${repo}/commits/${sha}`,
         token
       );
-      headCommitMsg = (commit?.commit?.message || "").trim();
-      if (hasDirective(headCommitMsg)) source = "push-head-commit";
+      const msg = (commit?.commit?.message || "").trim();
+      return { message: msg, source: "push-head-commit" };
     } catch (e) {
       core.warning(`Push head commit fetch failed: ${e.message}`);
     }
   }
-  if (!headCommitMsg) {
-    try {
-      const m = execSync("git log -1 --pretty=%B", {
-        cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
-        stdio: ["ignore", "pipe", "ignore"],
-        encoding: "utf8"
-      }).trim();
-      headCommitMsg = m;
-      if (hasDirective(headCommitMsg) && source === "none") source = "git-log";
-    } catch {
-    }
+  try {
+    const msg = execSync("git log -1 --pretty=%B", {
+      cwd: process.env.GITHUB_WORKSPACE || process.cwd(),
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    }).trim();
+    return { message: msg, source: "git-log" };
+  } catch {
   }
-  const defaultsObj = parseDirectives(prBodyDefaults);
-  const headObj = parseDirectives(headCommitMsg);
-  const merged = { ...defaultsObj, ...headObj };
-  const effectiveMessage = Object.entries(merged).map(([k, v]) => `${k}=${v}`).join("\n").trim();
-  return {
-    effectiveMessage,
-    prBodyDefaultsMessage: prBodyDefaults,
-    headCommitMessage: headCommitMsg,
-    source
-  };
+  return { message: "", source: "none" };
 }
 async function run() {
   try {
@@ -20008,15 +19968,16 @@ async function run() {
     const [owner, repo] = repoFull ? repoFull.split("/") : ["", ""];
     const eventPath = env("GITHUB_EVENT_PATH");
     const sha = env("GITHUB_SHA");
-    const {
-      effectiveMessage,
-      prBodyDefaultsMessage,
-      headCommitMessage,
-      source
-    } = await harvestLatestWithPRDefaults({ token, owner, repo, eventPath, sha });
+    const { message, source } = await harvestMessageLatestOnly({
+      token,
+      owner,
+      repo,
+      eventPath,
+      sha
+    });
     const plan = computePlan({
       config,
-      message: effectiveMessage,
+      message,
       labels: labelsOverride,
       inputs: { modeInput }
     });
@@ -20027,10 +19988,8 @@ async function run() {
     core.setOutput("targets_list", plan.targetsList);
     core.setOutput("enabled_jobs", plan.enabledJobs.join(" "));
     core.setOutput("directive_source", source);
-    core.setOutput("raw_message", plan.rawMessage || effectiveMessage || "");
+    core.setOutput("raw_message", plan.rawMessage || message || "");
     core.setOutput("raw_directives", JSON.stringify(plan.debug?.directives || {}));
-    core.setOutput("raw_pr_body_defaults", prBodyDefaultsMessage || "");
-    core.setOutput("raw_head_commit", headCommitMessage || "");
     core.startGroup("planner summary");
     core.info(`SOURCE: ${source}`);
     core.info(`MODE: ${plan.mode}`);
@@ -20050,9 +20009,7 @@ module.exports = {
   parseDirectives,
   normalizeList,
   lowerUnique,
-  // exported in case you want to unit test harvesting separately later
-  hasDirective,
-  extractDirectiveLines
+  hasDirective
 };
 /*! Bundled license information:
 
