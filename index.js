@@ -93,7 +93,52 @@ function computePlan(opts) {
   const labels = lowerUnique(opts.labels || []);
   const directives = parseDirectives(message);
 
-  // Mode
+  // Global job and target pools
+  const jobsCfg = cfg.jobs || ["feelpp", "testsuite", "toolboxes", "mor", "python"];
+  const targetsCfg =
+    cfg.targets || ["ubuntu:24.04", "ubuntu:22.04", "debian:13", "debian:12", "fedora:42"];
+
+  // Build modes configuration (new unified schema)
+  // Supports both old fullBuild.job and new modes.{name}.jobs format
+  const modes = cfg.modes || {};
+
+  // Build full mode job list from various sources (backwards compatible)
+  const getFullModeJobs = () => {
+    // 1. New schema: modes.full.jobs (array)
+    if (modes.full?.jobs && Array.isArray(modes.full.jobs)) {
+      return modes.full.jobs;
+    }
+    // 2. Old schema: fullBuild.job (string) or fullBuild.jobs (array)
+    if (cfg.fullBuild) {
+      if (Array.isArray(cfg.fullBuild.jobs)) return cfg.fullBuild.jobs;
+      if (cfg.fullBuild.job) return [cfg.fullBuild.job];
+    }
+    // 3. Default fallback
+    return ["feelpp-spack"];
+  };
+
+  const getFullModeTargets = () => {
+    // 1. New schema: modes.full.targets
+    if (modes.full?.targets && Array.isArray(modes.full.targets)) {
+      return modes.full.targets;
+    }
+    // 2. Old schema: fullBuild.targets
+    if (cfg.fullBuild?.targets && Array.isArray(cfg.fullBuild.targets)) {
+      return cfg.fullBuild.targets;
+    }
+    // 3. Fall back to default targets
+    return null; // will use defaultTargets
+  };
+
+  const fullModeJobs = getFullModeJobs();
+  const fullModeTargets = getFullModeTargets();
+
+  // Default jobs and targets (components mode)
+  const defaultJobs = modes.components?.jobs || cfg.defaults?.jobs || jobsCfg;
+  const defaultTargets = modes.components?.targets || cfg.defaults?.targets || targetsCfg;
+
+  // Mode resolution
+  // Precedence: modeInput > directives.mode > auto-detect from only= > defaults
   let mode =
     (opts.inputs && opts.inputs.modeInput) ||
     directives.mode ||
@@ -101,24 +146,29 @@ function computePlan(opts) {
     "components";
   mode = String(mode).toLowerCase();
 
-  // Jobs & defaults
-  const jobsCfg = cfg.jobs || ["feelpp", "testsuite", "toolboxes", "mor", "python"];
-  const defaultJobs = cfg.defaults?.jobs || jobsCfg;
-
-  // Targets & defaults
-  const targetsCfg =
-    cfg.targets || ["ubuntu:24.04", "ubuntu:22.04", "debian:13", "debian:12", "fedora:42"];
-  const defaultTargets = cfg.defaults?.targets || targetsCfg;
-
   // Labels can switch mode (optional)
   if (labels.includes("ci-mode-full")) mode = "full";
   if (labels.includes("ci-mode-components")) mode = "components";
 
-  // Enabled jobs
-  let enabledJobs =
-    mode === "full"
-      ? [(cfg.fullBuild && cfg.fullBuild.job) || "feelpp-spack"]
-      : [...defaultJobs];
+  // Auto-detect full mode: if only= contains a full mode job, switch to full mode
+  const onlyJobsRaw = normalizeList(directives.only || "");
+  if (onlyJobsRaw.length && !directives.mode) {
+    const fullJobsLower = fullModeJobs.map(j => j.toLowerCase());
+    const hasFullJob = onlyJobsRaw.some(j => fullJobsLower.includes(j.toLowerCase()));
+    const hasComponentJob = onlyJobsRaw.some(j =>
+      defaultJobs.map(dj => dj.toLowerCase()).includes(j.toLowerCase())
+    );
+    // If only full jobs requested (no component jobs), auto-switch to full mode
+    if (hasFullJob && !hasComponentJob) {
+      mode = "full";
+    }
+  }
+
+  // Enabled jobs based on mode
+  let enabledJobs = mode === "full" ? [...fullModeJobs] : [...defaultJobs];
+
+  // Build the valid jobs pool for filtering (includes both component and full jobs)
+  const allValidJobs = lowerUnique([...jobsCfg, ...fullModeJobs]);
 
   // only / skip jobs (from directives)
   const onlyJobsList = lowerUnique(
@@ -129,14 +179,18 @@ function computePlan(opts) {
   );
 
   if (onlyJobsList.length) {
+    // Filter only= against enabled jobs (which now includes full mode jobs when appropriate)
     enabledJobs = enabledJobs.filter((j) => onlyJobsList.includes(j.toLowerCase()));
   }
   if (skipJobsList.length) {
     enabledJobs = enabledJobs.filter((j) => !skipJobsList.includes(j.toLowerCase()));
   }
 
-  // Resolve targets
-  let workingTargets = [...defaultTargets];
+  // Resolve targets - use mode-specific defaults if available
+  let modeDefaultTargets = mode === "full" && fullModeTargets
+    ? fullModeTargets
+    : defaultTargets;
+  let workingTargets = [...modeDefaultTargets];
 
   // allow only= to carry platforms if it contains ':'
   if (directives.only && directives.only.includes(":")) {
@@ -154,7 +208,7 @@ function computePlan(opts) {
     const ex = new Set(normalizeList(directives.exclude));
     workingTargets = workingTargets.filter((t) => !ex.has(t));
   }
-  if (!workingTargets.length) workingTargets = [...defaultTargets];
+  if (!workingTargets.length) workingTargets = [...modeDefaultTargets];
 
   return {
     mode,
@@ -164,7 +218,7 @@ function computePlan(opts) {
     targetsList: workingTargets.join(" "),
     targetsJson: JSON.stringify(workingTargets),
     rawMessage: message,
-    debug: { directives, labels, workingTargets },
+    debug: { directives, labels, workingTargets, fullModeJobs, allValidJobs },
   };
 }
 

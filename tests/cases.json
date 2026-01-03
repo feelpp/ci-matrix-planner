@@ -35,7 +35,7 @@
     }
   },
   {
-    "name": "mode full becomes single job",
+    "name": "mode full becomes single job (old schema)",
     "config": { "fullBuild": { "job": "feelpp-spack" } },
     "message": "mode=full",
     "labels": [],
@@ -51,6 +51,96 @@
     "labels": [],
     "expected": {
       "targetsList": "debian:12"
+    }
+  },
+  {
+    "name": "auto-detect full mode from only=feelpp-full",
+    "config": {
+      "jobs": ["feelpp", "testsuite", "toolboxes", "mor", "python"],
+      "fullBuild": { "job": "feelpp-full" }
+    },
+    "message": "only=feelpp-full",
+    "labels": [],
+    "expected": {
+      "mode": "full",
+      "enabledJobs": ["feelpp-full"]
+    }
+  },
+  {
+    "name": "new modes schema with multiple full jobs",
+    "config": {
+      "jobs": ["feelpp", "testsuite", "toolboxes"],
+      "modes": {
+        "full": {
+          "jobs": ["feelpp-full", "feelpp-full-debug"],
+          "targets": ["ubuntu:24.04"]
+        }
+      }
+    },
+    "message": "mode=full",
+    "labels": [],
+    "expected": {
+      "mode": "full",
+      "enabledJobs": ["feelpp-full", "feelpp-full-debug"],
+      "targetsList": "ubuntu:24.04"
+    }
+  },
+  {
+    "name": "mode=full with only= filter",
+    "config": {
+      "modes": {
+        "full": {
+          "jobs": ["feelpp-full", "feelpp-full-debug"]
+        }
+      }
+    },
+    "message": "mode=full\nonly=feelpp-full",
+    "labels": [],
+    "expected": {
+      "mode": "full",
+      "enabledJobs": ["feelpp-full"]
+    }
+  },
+  {
+    "name": "fullBuild.jobs array (backwards compat)",
+    "config": {
+      "fullBuild": { "jobs": ["feelpp-full", "feelpp-full-alt"] }
+    },
+    "message": "mode=full",
+    "labels": [],
+    "expected": {
+      "mode": "full",
+      "enabledJobs": ["feelpp-full", "feelpp-full-alt"]
+    }
+  },
+  {
+    "name": "full mode with mode-specific targets",
+    "config": {
+      "targets": ["ubuntu:24.04", "debian:13", "fedora:42"],
+      "defaults": { "targets": ["ubuntu:24.04", "debian:13", "fedora:42"] },
+      "fullBuild": {
+        "job": "feelpp-full",
+        "targets": ["ubuntu:24.04"]
+      }
+    },
+    "message": "mode=full",
+    "labels": [],
+    "expected": {
+      "mode": "full",
+      "enabledJobs": ["feelpp-full"],
+      "targetsList": "ubuntu:24.04"
+    }
+  },
+  {
+    "name": "ci-mode-full label triggers full mode",
+    "config": {
+      "fullBuild": { "job": "feelpp-full" }
+    },
+    "message": "",
+    "labels": ["ci-mode-full"],
+    "expected": {
+      "mode": "full",
+      "enabledJobs": ["feelpp-full"]
     }
   }
 ]

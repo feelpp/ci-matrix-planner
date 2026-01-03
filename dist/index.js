@@ -19855,15 +19855,49 @@ function computePlan(opts) {
   const message = (opts.message || "").trim();
   const labels = lowerUnique(opts.labels || []);
   const directives = parseDirectives(message);
+  const jobsCfg = cfg.jobs || ["feelpp", "testsuite", "toolboxes", "mor", "python"];
+  const targetsCfg = cfg.targets || ["ubuntu:24.04", "ubuntu:22.04", "debian:13", "debian:12", "fedora:42"];
+  const modes = cfg.modes || {};
+  const getFullModeJobs = () => {
+    if (modes.full?.jobs && Array.isArray(modes.full.jobs)) {
+      return modes.full.jobs;
+    }
+    if (cfg.fullBuild) {
+      if (Array.isArray(cfg.fullBuild.jobs)) return cfg.fullBuild.jobs;
+      if (cfg.fullBuild.job) return [cfg.fullBuild.job];
+    }
+    return ["feelpp-spack"];
+  };
+  const getFullModeTargets = () => {
+    if (modes.full?.targets && Array.isArray(modes.full.targets)) {
+      return modes.full.targets;
+    }
+    if (cfg.fullBuild?.targets && Array.isArray(cfg.fullBuild.targets)) {
+      return cfg.fullBuild.targets;
+    }
+    return null;
+  };
+  const fullModeJobs = getFullModeJobs();
+  const fullModeTargets = getFullModeTargets();
+  const defaultJobs = modes.components?.jobs || cfg.defaults?.jobs || jobsCfg;
+  const defaultTargets = modes.components?.targets || cfg.defaults?.targets || targetsCfg;
   let mode = opts.inputs && opts.inputs.modeInput || directives.mode || cfg.defaults?.mode || "components";
   mode = String(mode).toLowerCase();
-  const jobsCfg = cfg.jobs || ["feelpp", "testsuite", "toolboxes", "mor", "python"];
-  const defaultJobs = cfg.defaults?.jobs || jobsCfg;
-  const targetsCfg = cfg.targets || ["ubuntu:24.04", "ubuntu:22.04", "debian:13", "debian:12", "fedora:42"];
-  const defaultTargets = cfg.defaults?.targets || targetsCfg;
   if (labels.includes("ci-mode-full")) mode = "full";
   if (labels.includes("ci-mode-components")) mode = "components";
-  let enabledJobs = mode === "full" ? [cfg.fullBuild && cfg.fullBuild.job || "feelpp-spack"] : [...defaultJobs];
+  const onlyJobsRaw = normalizeList(directives.only || "");
+  if (onlyJobsRaw.length && !directives.mode) {
+    const fullJobsLower = fullModeJobs.map((j) => j.toLowerCase());
+    const hasFullJob = onlyJobsRaw.some((j) => fullJobsLower.includes(j.toLowerCase()));
+    const hasComponentJob = onlyJobsRaw.some(
+      (j) => defaultJobs.map((dj) => dj.toLowerCase()).includes(j.toLowerCase())
+    );
+    if (hasFullJob && !hasComponentJob) {
+      mode = "full";
+    }
+  }
+  let enabledJobs = mode === "full" ? [...fullModeJobs] : [...defaultJobs];
+  const allValidJobs = lowerUnique([...jobsCfg, ...fullModeJobs]);
   const onlyJobsList = lowerUnique(
     normalizeList(directives.only || (cfg.defaults?.onlyJobs || []).join(" "))
   );
@@ -19876,7 +19910,8 @@ function computePlan(opts) {
   if (skipJobsList.length) {
     enabledJobs = enabledJobs.filter((j) => !skipJobsList.includes(j.toLowerCase()));
   }
-  let workingTargets = [...defaultTargets];
+  let modeDefaultTargets = mode === "full" && fullModeTargets ? fullModeTargets : defaultTargets;
+  let workingTargets = [...modeDefaultTargets];
   if (directives.only && directives.only.includes(":")) {
     workingTargets = normalizeList(directives.only);
   }
@@ -19892,7 +19927,7 @@ function computePlan(opts) {
     const ex = new Set(normalizeList(directives.exclude));
     workingTargets = workingTargets.filter((t) => !ex.has(t));
   }
-  if (!workingTargets.length) workingTargets = [...defaultTargets];
+  if (!workingTargets.length) workingTargets = [...modeDefaultTargets];
   return {
     mode,
     enabledJobs,
@@ -19901,7 +19936,7 @@ function computePlan(opts) {
     targetsList: workingTargets.join(" "),
     targetsJson: JSON.stringify(workingTargets),
     rawMessage: message,
-    debug: { directives, labels, workingTargets }
+    debug: { directives, labels, workingTargets, fullModeJobs, allValidJobs }
   };
 }
 async function harvestMessageLatestOnly({ token, owner, repo, eventPath, sha }) {
