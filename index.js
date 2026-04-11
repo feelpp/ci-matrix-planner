@@ -19,6 +19,13 @@ const core = require("@actions/core");
  * ========================= */
 
 const env = (k, d = "") => process.env[k] || d;
+const SUPPORTED_CI_MODES = new Set(["components", "full"]);
+const DEFAULT_JOBS = ["feelpp", "testsuite", "toolboxes", "mor", "python"];
+const DEFAULT_TARGETS = ["ubuntu:24.04", "ubuntu:22.04", "debian:13", "debian:12", "fedora:42"];
+const DEFAULT_PROFILE = "ci";
+const PACKAGING_PROFILE = "packaging";
+const PACKAGING_MODE = "packaging";
+const DEFAULT_PKG_JOB = "packaging";
 
 function httpGetJson(url, token) {
   return new Promise((resolve, reject) => {
@@ -52,7 +59,7 @@ function httpGetJson(url, token) {
 
 // strict detector: key=value at start of a line (multiline)
 const hasDirective = (txt) =>
-  /^\s*(only|skip|targets|include|exclude|mode)\s*=/m.test(txt || "");
+  /^\s*[A-Za-z_][A-Za-z0-9_-]*\s*=/m.test(txt || "");
 
 // split list on commas and/or whitespace; trim; drop empties
 function normalizeList(raw) {
@@ -63,13 +70,44 @@ function normalizeList(raw) {
     .filter(Boolean);
 }
 
+function uniqueList(list) {
+  const seen = new Set();
+  const out = [];
+  for (const item of list || []) {
+    const value = String(item);
+    if (!seen.has(value)) {
+      seen.add(value);
+      out.push(value);
+    }
+  }
+  return out;
+}
+
 // accept only simple key=value lines (ignore bullets, Markdown, etc.)
 function parseDirectives(msg) {
   const out = {};
+  const mergeKeys = new Set([
+    "only",
+    "skip",
+    "targets",
+    "include",
+    "exclude",
+    "pkg",
+    "pkg-targets",
+    "pkg-include",
+    "pkg-exclude",
+  ]);
   if (!msg) return out;
   for (const ln of String(msg).split(/\r?\n/)) {
-    const m = ln.match(/^\s*([A-Za-z_]+)\s*=\s*(.+?)\s*$/);
-    if (m) out[m[1].toLowerCase()] = m[2].trim();
+    const m = ln.match(/^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(.+?)\s*$/);
+    if (!m) continue;
+    const key = m[1].toLowerCase();
+    const value = m[2].trim();
+    if (mergeKeys.has(key) && out[key]) {
+      out[key] = `${out[key]} ${value}`;
+    } else {
+      out[key] = value;
+    }
   }
   return out;
 }
@@ -83,6 +121,491 @@ function lowerUnique(list) {
   return out;
 }
 
+function listToJson(list) {
+  return JSON.stringify(list || []);
+}
+
+function readEventPayload(eventPath) {
+  if (!eventPath || !fs.existsSync(eventPath)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(eventPath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function extractLabelsFromPayload(payload) {
+  const sources = [
+    payload?.pull_request?.labels,
+    payload?.issue?.labels,
+    payload?.labels,
+  ];
+  for (const labels of sources) {
+    if (Array.isArray(labels)) {
+      return lowerUnique(labels.map((item) =>
+        typeof item === "string" ? item : item?.name
+      ).filter(Boolean));
+    }
+  }
+  return [];
+}
+
+function extractDispatchOverridesFromPayload(payload) {
+  const inputs = payload?.inputs || {};
+  return {
+    modeInput: String(inputs.mode_input || inputs.mode || "").trim(),
+    messageOverride: String(inputs.message_override || inputs.message || "").trim(),
+    labelsOverride: lowerUnique(normalizeList(inputs.labels_override || inputs.labels || "")),
+  };
+}
+
+function extractContextFromPayload(payload, explicitInputs = {}) {
+  const dispatch = extractDispatchOverridesFromPayload(payload);
+  const explicitLabels = lowerUnique(normalizeList(explicitInputs.labelsOverride || ""));
+  const labels = explicitLabels.length
+    ? explicitLabels
+    : (dispatch.labelsOverride.length ? dispatch.labelsOverride : extractLabelsFromPayload(payload));
+  const modeInput = String(explicitInputs.modeInput || dispatch.modeInput || "").trim();
+  const explicitMessage = String(explicitInputs.messageOverride || "").trim();
+  const prHeadSha = payload?.pull_request?.head?.sha || "";
+  const pushHeadSha = payload?.after || payload?.head_commit?.id || "";
+
+  if (hasDirective(explicitMessage)) {
+    return {
+      labels,
+      modeInput,
+      message: explicitMessage,
+      source: "override",
+      prHeadSha,
+      pushHeadSha,
+    };
+  }
+
+  if (hasDirective(dispatch.messageOverride)) {
+    return {
+      labels,
+      modeInput,
+      message: dispatch.messageOverride,
+      source: "workflow-dispatch-input",
+      prHeadSha,
+      pushHeadSha,
+    };
+  }
+
+  const prTitleBody = [payload?.pull_request?.title, payload?.pull_request?.body]
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  if (hasDirective(prTitleBody)) {
+    return {
+      labels,
+      modeInput,
+      message: prTitleBody,
+      source: "pr-title-body",
+      prHeadSha,
+      pushHeadSha,
+    };
+  }
+
+  const pushMessage = String(payload?.head_commit?.message || "").trim();
+  if (hasDirective(pushMessage)) {
+    return {
+      labels,
+      modeInput,
+      message: pushMessage,
+      source: "push-head-commit-payload",
+      prHeadSha,
+      pushHeadSha,
+    };
+  }
+
+  return {
+    labels,
+    modeInput,
+    message: "",
+    source: "payload-none",
+    prHeadSha,
+    pushHeadSha,
+  };
+}
+
+function filterKnownTokens(tokens, knownSet) {
+  const valid = [];
+  const unknown = [];
+  for (const token of tokens || []) {
+    const normalized = String(token).toLowerCase();
+    if (knownSet.has(normalized)) valid.push(normalized);
+    else unknown.push(normalized);
+  }
+  return {
+    valid: lowerUnique(valid),
+    unknown: lowerUnique(unknown),
+  };
+}
+
+function globToRegExp(pattern) {
+  let regex = "^";
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    const next = pattern[i + 1];
+    if (ch === "*" && next === "*") {
+      regex += ".*";
+      i++;
+      continue;
+    }
+    if (ch === "*") {
+      regex += "[^/]*";
+      continue;
+    }
+    regex += ch.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+  }
+  regex += "$";
+  return new RegExp(regex);
+}
+
+function matchesAnyPattern(file, patterns) {
+  return (patterns || []).some((pattern) => globToRegExp(String(pattern)).test(file));
+}
+
+function normalizeRuleProfiles(rule) {
+  return lowerUnique(
+    []
+      .concat(rule?.enableProfiles || [])
+      .concat(rule?.profiles || [])
+      .concat(rule?.profile || [])
+      .filter(Boolean)
+  );
+}
+
+function resolveRuleTargets(rule, profile) {
+  if (Array.isArray(rule?.targets)) return rule.targets;
+  if (Array.isArray(rule?.defaultTargets)) return rule.defaultTargets;
+  if (Array.isArray(rule?.targetsByProfile?.[profile])) return rule.targetsByProfile[profile];
+  if (Array.isArray(rule?.defaultTargets?.[profile])) return rule.defaultTargets[profile];
+  return [];
+}
+
+function collectRuleDefaultTargets(pathRules, changedFiles, profile) {
+  const matchedRules = [];
+  const targets = [];
+  for (const rule of pathRules || []) {
+    const ruleProfiles = normalizeRuleProfiles(rule);
+    if (ruleProfiles.length && !ruleProfiles.includes(profile)) continue;
+    if (!matchesAnyPatternList(changedFiles, rule?.patterns || [])) continue;
+    matchedRules.push(rule);
+    for (const target of resolveRuleTargets(rule, profile)) {
+      targets.push(String(target).toLowerCase());
+    }
+  }
+  return {
+    matchedRules,
+    targets: lowerUnique(targets),
+  };
+}
+
+function matchesAnyPatternList(files, patterns) {
+  return (files || []).some((file) => matchesAnyPattern(file, patterns));
+}
+
+function normalizeCatalog(catalog) {
+  const out = {};
+  for (const [key, value] of Object.entries(catalog || {})) {
+    out[String(key).toLowerCase()] = value;
+  }
+  return out;
+}
+
+function normalizeGroups(groups) {
+  const out = {};
+  for (const [key, value] of Object.entries(groups || {})) {
+    out[String(key).toLowerCase()] = (value || []).map((item) => String(item).toLowerCase());
+  }
+  return out;
+}
+
+function expandGroupTargets(tokens, groups) {
+  const out = [];
+  for (const token of tokens || []) {
+    const normalized = String(token).toLowerCase();
+    if (groups[normalized]) {
+      out.push(...groups[normalized]);
+    } else {
+      out.push(normalized);
+    }
+  }
+  return lowerUnique(out);
+}
+
+function resolvePlanningConfig(config, requestedProfile, warnings) {
+  const profiles = config?.profiles;
+  if (!profiles || typeof profiles !== "object" || Array.isArray(profiles)) {
+    if (requestedProfile && String(requestedProfile).toLowerCase() !== DEFAULT_PROFILE) {
+      warnings.push(`Profile "${requestedProfile}" requested, but config has no profiles; using legacy root config`);
+    }
+    return {
+      profile: DEFAULT_PROFILE,
+      config,
+    };
+  }
+
+  const profileEntries = Object.entries(profiles);
+  const availableProfiles = Object.fromEntries(profileEntries.map(([name, cfg]) => [String(name).toLowerCase(), cfg]));
+  const availableNames = Object.keys(availableProfiles);
+  const defaultProfileCandidate = String(config.defaultProfile || (availableProfiles[DEFAULT_PROFILE] ? DEFAULT_PROFILE : availableNames[0] || DEFAULT_PROFILE)).toLowerCase();
+  const fallbackProfile = availableProfiles[defaultProfileCandidate] ? defaultProfileCandidate : (availableProfiles[DEFAULT_PROFILE] ? DEFAULT_PROFILE : availableNames[0] || DEFAULT_PROFILE);
+  const requested = String(requestedProfile || defaultProfileCandidate || fallbackProfile).toLowerCase();
+  const resolvedProfile = availableProfiles[requested] ? requested : fallbackProfile;
+  if (!availableProfiles[requested] && requestedProfile) {
+    warnings.push(`Unknown profile "${requestedProfile}", falling back to "${resolvedProfile}"`);
+  }
+  const profileConfig = availableProfiles[resolvedProfile] || {};
+  return {
+    profile: resolvedProfile,
+    config: {
+      ...profileConfig,
+      pathRules: [].concat(config.pathRules || []).concat(profileConfig.pathRules || []),
+    },
+  };
+}
+
+function buildMatrixForTargets(targets, catalog, warnings) {
+  if (!Object.keys(catalog || {}).length) {
+    return {
+      matrix: { target: targets },
+      matrixRows: targets.map((target) => ({ target })),
+    };
+  }
+
+  const include = [];
+  for (const target of targets) {
+    const row = catalog[target];
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      warnings.push(`Catalog entry missing or invalid for target "${target}"`);
+      continue;
+    }
+    include.push({
+      target,
+      ...row,
+    });
+  }
+  return {
+    matrix: { include },
+    matrixRows: include,
+  };
+}
+
+function getRefName(payload) {
+  const refName = payload?.ref ? String(payload.ref).split("/").pop() : "";
+  return (payload?.ref_name || refName || "").trim();
+}
+
+function getPackagingProfileConfig(config) {
+  return config?.profiles?.[PACKAGING_PROFILE] || {};
+}
+
+function getPackagingConfig(config, activeProfile, activeConfig) {
+  const rootCfg = config?.packaging || {};
+  const profileCfg = activeProfile === PACKAGING_PROFILE
+    ? (activeConfig || {})
+    : getPackagingProfileConfig(config);
+  return {
+    jobs: profileCfg.jobs || rootCfg.jobs || [DEFAULT_PKG_JOB],
+    defaults: profileCfg.defaults || rootCfg.defaults || {},
+    defaultTargets: profileCfg.defaultTargets || rootCfg.defaultTargets || [],
+    catalog: profileCfg.catalog || rootCfg.catalog || {},
+    groups: profileCfg.groups || rootCfg.groups || {},
+    defaultOnBranches: profileCfg.defaultOnBranches || rootCfg.defaultOnBranches || [],
+  };
+}
+
+function getPackagingDefaultTargets(packagingConfig) {
+  return lowerUnique(
+    []
+      .concat(packagingConfig?.defaults?.targets || [])
+      .concat(packagingConfig?.defaultTargets || [])
+      .filter(Boolean)
+      .map((item) => String(item).toLowerCase())
+  );
+}
+
+function getPackagingKnownTargetSet(defaultTargets, catalog, groups) {
+  return new Set(lowerUnique(
+    []
+      .concat(defaultTargets || [])
+      .concat(Object.keys(catalog || {}))
+      .concat(Object.values(groups || {}).flatMap((items) => items || []))
+      .filter(Boolean)
+      .map((item) => String(item).toLowerCase())
+  ));
+}
+
+function expandPackagingTokens(tokens, { defaultTargets, catalog, groups }) {
+  const normalized = lowerUnique(tokens || []);
+  const catalogTargets = Object.keys(catalog || {}).map((item) => String(item).toLowerCase());
+  const explicitNoneOnly = normalized.length > 0 && normalized.every((token) => token === "none");
+  const out = [];
+
+  for (const token of normalized) {
+    if (token === "none") continue;
+    if (token === "default") {
+      out.push(...defaultTargets);
+      continue;
+    }
+    if (token === "all") {
+      out.push(...(catalogTargets.length ? catalogTargets : defaultTargets));
+      continue;
+    }
+    if (groups[token]) {
+      out.push(...groups[token]);
+      continue;
+    }
+    out.push(token);
+  }
+
+  return {
+    explicitNoneOnly,
+    targets: lowerUnique(out),
+  };
+}
+
+function normalizePackagingTargets(rawTargets, sourceName, knownTargetSet, warnings) {
+  if (!knownTargetSet.size) {
+    return lowerUnique(rawTargets || []);
+  }
+  const { valid, unknown } = filterKnownTokens(rawTargets, knownTargetSet);
+  if (unknown.length) {
+    warnings.push(`Unknown packaging targets in ${sourceName}: ${unknown.join(", ")}`);
+  }
+  return valid;
+}
+
+function selectPackagingTargets({ directives, packagingConfig, warnings, useDefaults }) {
+  const defaultTargets = getPackagingDefaultTargets(packagingConfig);
+  const catalog = normalizeCatalog(packagingConfig.catalog || {});
+  const groups = normalizeGroups(packagingConfig.groups || {});
+  const knownTargetSet = getPackagingKnownTargetSet(defaultTargets, catalog, groups);
+
+  const baseRaw = normalizeList(directives.pkg || directives["pkg-targets"] || "");
+  const includeRaw = normalizeList(directives["pkg-include"] || "");
+  const excludeRaw = normalizeList(directives["pkg-exclude"] || "");
+  const baseSource = directives.pkg ? "pkg=" : "pkg-targets=";
+
+  const baseExpanded = expandPackagingTokens(baseRaw, { defaultTargets, catalog, groups });
+  const includeExpanded = expandPackagingTokens(includeRaw, { defaultTargets, catalog, groups });
+  const excludeExpanded = expandPackagingTokens(excludeRaw, { defaultTargets, catalog, groups });
+
+  let targets = [];
+  if (baseRaw.length) {
+    targets = baseExpanded.explicitNoneOnly
+      ? []
+      : normalizePackagingTargets(baseExpanded.targets, baseSource, knownTargetSet, warnings);
+  } else if (useDefaults) {
+    targets = defaultTargets.slice();
+  }
+
+  if (includeRaw.length) {
+    targets = lowerUnique(targets.concat(
+      normalizePackagingTargets(includeExpanded.targets, "pkg-include=", knownTargetSet, warnings)
+    ));
+  }
+
+  if (excludeRaw.length) {
+    const excludeSet = new Set(
+      normalizePackagingTargets(excludeExpanded.targets, "pkg-exclude=", knownTargetSet, warnings)
+    );
+    targets = targets.filter((target) => !excludeSet.has(target));
+  }
+
+  return {
+    catalog,
+    defaultTargets,
+    hasPkgDirectives: !!(baseRaw.length || includeRaw.length || excludeRaw.length),
+    pkgTargets: lowerUnique(targets),
+  };
+}
+
+function computePackagingOutputs({ cfg, activeProfile, activeConfig, directives, context, warnings, forcePackagingProfile = false }) {
+  const packagingConfig = getPackagingConfig(cfg, activeProfile, activeConfig);
+  const refName = String(context.refName || "").toLowerCase();
+  const branchDefaults = lowerUnique((packagingConfig.defaultOnBranches || []).map((item) => String(item).toLowerCase()));
+  const branchDefaultEnabled = !forcePackagingProfile && activeProfile === DEFAULT_PROFILE && branchDefaults.includes(refName);
+  const packagingRequested = forcePackagingProfile || branchDefaultEnabled;
+
+  const selection = selectPackagingTargets({
+    directives,
+    packagingConfig,
+    warnings,
+    useDefaults: packagingRequested,
+  });
+  const pkgRequested = selection.hasPkgDirectives || packagingRequested;
+  const pkgTargets = selection.pkgTargets;
+  if (pkgRequested && !pkgTargets.length) {
+    warnings.push("No packaging targets selected");
+  }
+
+  const { matrix: pkgMatrix, matrixRows: pkgMatrixRows } = buildMatrixForTargets(
+    pkgTargets,
+    selection.catalog,
+    warnings
+  );
+
+  return {
+    packagingConfig,
+    pkgEnabled: pkgTargets.length > 0,
+    pkgRequested,
+    pkgTargets,
+    pkgMatrix,
+    pkgMatrixRows,
+  };
+}
+
+function computePackagingProfilePlan({ cfg, activeConfig, activeProfile, directives, context, message, labels, warnings }) {
+  const packagingOutputs = computePackagingOutputs({
+    cfg,
+    activeProfile,
+    activeConfig,
+    directives,
+    context,
+    warnings,
+    forcePackagingProfile: true,
+  });
+  const configuredJobs = Array.isArray(packagingOutputs.packagingConfig.jobs)
+    ? packagingOutputs.packagingConfig.jobs.filter(Boolean)
+    : [];
+  const enabledJobs = configuredJobs.length ? configuredJobs : [DEFAULT_PKG_JOB];
+  const enabledProfiles = [activeProfile];
+
+  return {
+    mode: PACKAGING_MODE,
+    enabledJobs,
+    enabledJobsJson: listToJson(enabledJobs),
+    onlyJobs: "",
+    onlyJobsJson: listToJson([]),
+    skipJobs: "",
+    skipJobsJson: listToJson([]),
+    targetsList: packagingOutputs.pkgTargets.join(" "),
+    targetsJson: listToJson(packagingOutputs.pkgTargets),
+    matrixJson: JSON.stringify(packagingOutputs.pkgMatrix),
+    rawMessage: message,
+    warnings,
+    warningsJson: listToJson(warnings),
+    profile: activeProfile,
+    enabledProfiles,
+    enabledProfilesJson: listToJson(enabledProfiles),
+    pkgEnabled: packagingOutputs.pkgEnabled,
+    pkgTargets: packagingOutputs.pkgTargets,
+    pkgTargetsJson: listToJson(packagingOutputs.pkgTargets),
+    pkgMatrixJson: JSON.stringify(packagingOutputs.pkgMatrix),
+    pkgMatrixRowsJson: JSON.stringify(packagingOutputs.pkgMatrixRows),
+    debug: {
+      directives,
+      labels,
+      pkgTargets: packagingOutputs.pkgTargets,
+      packagingJobs: enabledJobs,
+    },
+  };
+}
+
 /* =========================
  * Planner core (pure)
  * ========================= */
@@ -92,15 +615,32 @@ function computePlan(opts) {
   const message = (opts.message || "").trim();
   const labels = lowerUnique(opts.labels || []);
   const directives = parseDirectives(message);
+  const warnings = [];
+  const context = opts.context || {};
+  const requestedProfile = String(opts.profile || "").trim();
+
+  const { profile: activeProfile, config: activeConfig } = resolvePlanningConfig(cfg, requestedProfile, warnings);
+
+  if (activeProfile === PACKAGING_PROFILE) {
+    return computePackagingProfilePlan({
+      cfg,
+      activeConfig,
+      activeProfile,
+      directives,
+      context,
+      message,
+      labels,
+      warnings,
+    });
+  }
 
   // Global job and target pools
-  const jobsCfg = cfg.jobs || ["feelpp", "testsuite", "toolboxes", "mor", "python"];
-  const targetsCfg =
-    cfg.targets || ["ubuntu:24.04", "ubuntu:22.04", "debian:13", "debian:12", "fedora:42"];
+  const jobsCfg = activeConfig.jobs || DEFAULT_JOBS;
+  const targetsCfg = activeConfig.targets || DEFAULT_TARGETS;
 
   // Build modes configuration (new unified schema)
   // Supports both old fullBuild.job and new modes.{name}.jobs format
-  const modes = cfg.modes || {};
+  const modes = activeConfig.modes || {};
 
   // Build full mode job list from various sources (backwards compatible)
   const getFullModeJobs = () => {
@@ -109,9 +649,9 @@ function computePlan(opts) {
       return modes.full.jobs;
     }
     // 2. Old schema: fullBuild.job (string) or fullBuild.jobs (array)
-    if (cfg.fullBuild) {
-      if (Array.isArray(cfg.fullBuild.jobs)) return cfg.fullBuild.jobs;
-      if (cfg.fullBuild.job) return [cfg.fullBuild.job];
+    if (activeConfig.fullBuild) {
+      if (Array.isArray(activeConfig.fullBuild.jobs)) return activeConfig.fullBuild.jobs;
+      if (activeConfig.fullBuild.job) return [activeConfig.fullBuild.job];
     }
     // 3. Default fallback
     return ["feelpp-spack"];
@@ -123,8 +663,8 @@ function computePlan(opts) {
       return modes.full.targets;
     }
     // 2. Old schema: fullBuild.targets
-    if (cfg.fullBuild?.targets && Array.isArray(cfg.fullBuild.targets)) {
-      return cfg.fullBuild.targets;
+    if (activeConfig.fullBuild?.targets && Array.isArray(activeConfig.fullBuild.targets)) {
+      return activeConfig.fullBuild.targets;
     }
     // 3. Fall back to default targets
     return null; // will use defaultTargets
@@ -134,30 +674,40 @@ function computePlan(opts) {
   const fullModeTargets = getFullModeTargets();
 
   // Default jobs and targets (components mode)
-  const defaultJobs = modes.components?.jobs || cfg.defaults?.jobs || jobsCfg;
-  const defaultTargets = modes.components?.targets || cfg.defaults?.targets || targetsCfg;
+  const defaultJobs = modes.components?.jobs || activeConfig.defaults?.jobs || jobsCfg;
+  const defaultTargets = modes.components?.targets || activeConfig.defaults?.targets || targetsCfg;
+  const fallbackModeCandidate = String(activeConfig.defaults?.mode || "components").toLowerCase();
+  const fallbackMode = SUPPORTED_CI_MODES.has(fallbackModeCandidate) ? fallbackModeCandidate : "components";
+  if (!SUPPORTED_CI_MODES.has(fallbackModeCandidate)) {
+    warnings.push(`Unsupported default mode "${fallbackModeCandidate}", falling back to "${fallbackMode}"`);
+  }
 
   // Mode resolution
   // Precedence: modeInput > directives.mode > auto-detect from only= > defaults
-  let mode =
+  let modeCandidate =
     (opts.inputs && opts.inputs.modeInput) ||
     directives.mode ||
-    cfg.defaults?.mode ||
-    "components";
-  mode = String(mode).toLowerCase();
+    fallbackMode;
+  modeCandidate = String(modeCandidate).toLowerCase();
+  let mode = modeCandidate;
+  if (!SUPPORTED_CI_MODES.has(modeCandidate)) {
+    warnings.push(`Unsupported mode "${modeCandidate}", falling back to "${fallbackMode}"`);
+    mode = fallbackMode;
+  }
 
   // Labels can switch mode (optional)
   if (labels.includes("ci-mode-full")) mode = "full";
   if (labels.includes("ci-mode-components")) mode = "components";
 
   // Auto-detect full mode: if only= contains a full mode job, switch to full mode
-  const onlyJobsRaw = normalizeList(directives.only || "");
-  if (onlyJobsRaw.length && !directives.mode) {
-    const fullJobsLower = fullModeJobs.map(j => j.toLowerCase());
-    const hasFullJob = onlyJobsRaw.some(j => fullJobsLower.includes(j.toLowerCase()));
-    const hasComponentJob = onlyJobsRaw.some(j =>
-      defaultJobs.map(dj => dj.toLowerCase()).includes(j.toLowerCase())
-    );
+  const directiveOnlyTokens = normalizeList(directives.only || "");
+  const directiveOnlyJobsRaw = directiveOnlyTokens.filter((item) => !item.includes(":"));
+  const directiveOnlyTargetsRaw = directiveOnlyTokens.filter((item) => item.includes(":"));
+  if (directiveOnlyJobsRaw.length && !directives.mode) {
+    const fullJobsLower = fullModeJobs.map((j) => j.toLowerCase());
+    const componentJobsLower = defaultJobs.map((dj) => dj.toLowerCase());
+    const hasFullJob = directiveOnlyJobsRaw.some((j) => fullJobsLower.includes(j.toLowerCase()));
+    const hasComponentJob = directiveOnlyJobsRaw.some((j) => componentJobsLower.includes(j.toLowerCase()));
     // If only full jobs requested (no component jobs), auto-switch to full mode
     if (hasFullJob && !hasComponentJob) {
       mode = "full";
@@ -169,14 +719,35 @@ function computePlan(opts) {
 
   // Build the valid jobs pool for filtering (includes both component and full jobs)
   const allValidJobs = lowerUnique([...jobsCfg, ...fullModeJobs]);
+  const knownJobSet = new Set(allValidJobs);
+  const knownTargetSet = new Set(lowerUnique([
+    ...DEFAULT_TARGETS,
+    ...targetsCfg,
+    ...defaultTargets,
+    ...(fullModeTargets || []),
+  ]));
 
   // only / skip jobs (from directives)
-  const onlyJobsList = lowerUnique(
-    normalizeList(directives.only || (cfg.defaults?.onlyJobs || []).join(" "))
+  const defaultOnlyJobsRaw = normalizeList((activeConfig.defaults?.onlyJobs || []).join(" "))
+    .filter((item) => !item.includes(":"));
+  const defaultSkipJobsRaw = normalizeList((activeConfig.defaults?.skipJobs || []).join(" "))
+    .filter((item) => !item.includes(":"));
+  const { valid: onlyJobsList, unknown: unknownOnlyJobs } = filterKnownTokens(
+    directiveOnlyJobsRaw.length ? directiveOnlyJobsRaw : defaultOnlyJobsRaw,
+    knownJobSet
   );
-  const skipJobsList = lowerUnique(
-    normalizeList(directives.skip || (cfg.defaults?.skipJobs || []).join(" "))
+  const { valid: skipJobsList, unknown: unknownSkipJobs } = filterKnownTokens(
+    normalizeList(directives.skip || "").filter((item) => !item.includes(":")).length
+      ? normalizeList(directives.skip || "").filter((item) => !item.includes(":"))
+      : defaultSkipJobsRaw,
+    knownJobSet
   );
+  if (unknownOnlyJobs.length) {
+    warnings.push(`Unknown jobs in only=: ${unknownOnlyJobs.join(", ")}`);
+  }
+  if (unknownSkipJobs.length) {
+    warnings.push(`Unknown jobs in skip=: ${unknownSkipJobs.join(", ")}`);
+  }
 
   if (onlyJobsList.length) {
     // Filter only= against enabled jobs (which now includes full mode jobs when appropriate)
@@ -190,69 +761,127 @@ function computePlan(opts) {
   let modeDefaultTargets = mode === "full" && fullModeTargets
     ? fullModeTargets
     : defaultTargets;
-  let workingTargets = [...modeDefaultTargets];
+  const normalizeTargets = (raw, sourceName) => {
+    const { valid, unknown } = filterKnownTokens(raw, knownTargetSet);
+    if (unknown.length) {
+      warnings.push(`Unknown targets in ${sourceName}: ${unknown.join(", ")}`);
+    }
+    return valid;
+  };
+  let workingTargets = [...modeDefaultTargets.map((item) => item.toLowerCase())];
 
   // allow only= to carry platforms if it contains ':'
-  if (directives.only && directives.only.includes(":")) {
-    workingTargets = normalizeList(directives.only);
+  if (directiveOnlyTargetsRaw.length) {
+    workingTargets = normalizeTargets(directiveOnlyTargetsRaw, "only=");
   }
   if (directives.targets) {
-    workingTargets = normalizeList(directives.targets);
+    workingTargets = normalizeTargets(normalizeList(directives.targets), "targets=");
   }
   if (directives.include) {
-    for (const t of normalizeList(directives.include)) {
+    for (const t of normalizeTargets(normalizeList(directives.include), "include=")) {
       if (!workingTargets.includes(t)) workingTargets.push(t);
     }
   }
   if (directives.exclude) {
-    const ex = new Set(normalizeList(directives.exclude));
+    const ex = new Set(normalizeTargets(normalizeList(directives.exclude), "exclude="));
     workingTargets = workingTargets.filter((t) => !ex.has(t));
   }
-  if (!workingTargets.length) workingTargets = [...modeDefaultTargets];
+  if (!workingTargets.length) {
+    warnings.push(`No targets selected, falling back to mode defaults: ${modeDefaultTargets.join(", ")}`);
+    workingTargets = [...modeDefaultTargets.map((item) => item.toLowerCase())];
+  }
+  if (!enabledJobs.length) {
+    warnings.push("No jobs selected after applying only=/skip= filters");
+  }
 
-  return {
+  const basePlan = {
     mode,
     enabledJobs,
+    enabledJobsJson: listToJson(enabledJobs),
     onlyJobs: onlyJobsList.join(" "),
+    onlyJobsJson: listToJson(onlyJobsList),
     skipJobs: skipJobsList.join(" "),
+    skipJobsJson: listToJson(skipJobsList),
     targetsList: workingTargets.join(" "),
     targetsJson: JSON.stringify(workingTargets),
+    matrixJson: JSON.stringify({ target: workingTargets }),
     rawMessage: message,
+    warnings,
+    warningsJson: listToJson(warnings),
     debug: { directives, labels, workingTargets, fullModeJobs, allValidJobs },
+  };
+
+  // Packaging profile handling (Phase 2)
+  const packagingOutputs = computePackagingOutputs({
+    cfg,
+    activeProfile,
+    activeConfig,
+    directives,
+    context,
+    warnings,
+  });
+  const enabledProfiles = packagingOutputs.pkgEnabled
+    ? uniqueList([activeProfile, PACKAGING_PROFILE])
+    : [activeProfile];
+
+  return {
+    ...basePlan,
+    profile: activeProfile,
+    enabledProfiles,
+    enabledProfilesJson: listToJson(enabledProfiles),
+    pkgEnabled: packagingOutputs.pkgEnabled,
+    pkgTargets: packagingOutputs.pkgTargets,
+    pkgTargetsJson: listToJson(packagingOutputs.pkgTargets),
+    pkgMatrixJson: JSON.stringify(packagingOutputs.pkgMatrix),
+    pkgMatrixRowsJson: JSON.stringify(packagingOutputs.pkgMatrixRows),
+    warningsJson: listToJson(warnings),
   };
 }
 
 /* =========================
- * Harvest message — latest commit only
+ * Harvest directives and labels
  * =========================
  * Precedence:
- *  1) override
- *  2) PR head commit (via PR head SHA)
- *  3) push head commit
- *  4) git log -1
+ *  1) explicit action inputs
+ *  2) workflow_dispatch inputs from event payload
+ *  3) PR labels from event payload
+ *  4) PR title/body directives
+ *  5) PR head commit
+ *  6) push head commit
+ *  7) git log -1
  */
-async function harvestMessageLatestOnly({ token, owner, repo, eventPath, sha }) {
-  // 0) override
-  const override = core.getInput("message-override") || "";
-  if (hasDirective(override)) {
-    return { message: override.trim(), source: "override", headSha: null };
+async function harvestDirectiveContext({ token, owner, repo, eventPath, sha, explicitInputs, coreImpl = core }) {
+  const payload = readEventPayload(eventPath);
+  const payloadContext = extractContextFromPayload(payload, explicitInputs);
+  if (payloadContext.message) {
+    return {
+      message: payloadContext.message,
+      source: payloadContext.source,
+      headSha: payloadContext.prHeadSha || payloadContext.pushHeadSha || "",
+      labels: payloadContext.labels,
+      modeInput: payloadContext.modeInput,
+    };
   }
 
   // 1) PR head commit by head SHA (most reliable, 1 call)
-  if (token && owner && repo && eventPath && fs.existsSync(eventPath)) {
+  if (token && owner && repo && payloadContext.prHeadSha) {
     try {
-      const ev = JSON.parse(fs.readFileSync(eventPath, "utf8"));
-      const headSha = ev?.pull_request?.head?.sha;
-      if (headSha) {
-        const commit = await httpGetJson(
-          `https://api.github.com/repos/${owner}/${repo}/commits/${headSha}`,
-          token
-        );
-        const msg = (commit?.commit?.message || "").trim();
-        return { message: msg, source: "pr-head-commit", headSha };
+      const commit = await httpGetJson(
+        `https://api.github.com/repos/${owner}/${repo}/commits/${payloadContext.prHeadSha}`,
+        token
+      );
+      const msg = (commit?.commit?.message || "").trim();
+      if (hasDirective(msg)) {
+        return {
+          message: msg,
+          source: "pr-head-commit",
+          headSha: payloadContext.prHeadSha,
+          labels: payloadContext.labels,
+          modeInput: payloadContext.modeInput,
+        };
       }
     } catch (e) {
-      core.warning(`PR head commit fetch (by head.sha) failed: ${e.message}`);
+      coreImpl.warning(`PR head commit fetch failed: ${e.message}`);
     }
   }
 
@@ -264,9 +893,17 @@ async function harvestMessageLatestOnly({ token, owner, repo, eventPath, sha }) 
         token
       );
       const msg = (commit?.commit?.message || "").trim();
-      return { message: msg, source: "push-head-commit", headSha: sha };
+      if (hasDirective(msg)) {
+        return {
+          message: msg,
+          source: "push-head-commit",
+          headSha: sha,
+          labels: payloadContext.labels,
+          modeInput: payloadContext.modeInput,
+        };
+      }
     } catch (e) {
-      core.warning(`Push head commit fetch failed: ${e.message}`);
+      coreImpl.warning(`Push head commit fetch failed: ${e.message}`);
     }
   }
 
@@ -277,85 +914,139 @@ async function harvestMessageLatestOnly({ token, owner, repo, eventPath, sha }) 
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf8",
     }).trim();
-    return { message: msg, source: "git-log", headSha: null };
+    if (hasDirective(msg)) {
+      return {
+        message: msg,
+        source: "git-log",
+        headSha: null,
+        labels: payloadContext.labels,
+        modeInput: payloadContext.modeInput,
+      };
+    }
   } catch { /* ignore */ }
 
   // 4) none
-  return { message: "", source: "none", headSha: null };
+  return {
+    message: "",
+    source: "none",
+    headSha: null,
+    labels: payloadContext.labels,
+    modeInput: payloadContext.modeInput,
+  };
 }
 
 /* =========================
  * Action entrypoint
  * ========================= */
 
-async function run() {
+async function run(deps = {}) {
+  const coreImpl = deps.core || core;
+  const envFn = deps.env || env;
+  const cwd = deps.cwd || process.cwd();
   try {
-    const configPath = core.getInput("config-path") || ".github/plan-ci.json";
+    const configPath = coreImpl.getInput("config-path") || ".github/plan-ci.json";
     const token =
-      core.getInput("github-token") || env("GITHUB_TOKEN") || env("GH_TOKEN") || "";
-    const modeInput = core.getInput("mode-input") || "";
-    const labelsOverride = normalizeList(core.getInput("labels-override") || "");
+      coreImpl.getInput("github-token") || envFn("GITHUB_TOKEN") || envFn("GH_TOKEN") || "";
+    const explicitInputs = {
+      profile: coreImpl.getInput("profile") || "",
+      modeInput: coreImpl.getInput("mode-input") || "",
+      messageOverride: coreImpl.getInput("message-override") || "",
+      labelsOverride: coreImpl.getInput("labels-override") || "",
+    };
 
     // load config
     let config = {};
     try {
-      const t = fs.readFileSync(path.resolve(process.cwd(), configPath), "utf8");
+      const t = fs.readFileSync(path.resolve(cwd, configPath), "utf8");
       config = JSON.parse(t);
     } catch (e) {
-      core.warning(`No config at ${configPath}; using defaults. (${e.message})`);
+      coreImpl.warning(`No config at ${configPath}; using defaults. (${e.message})`);
     }
 
-    const repoFull = env("GITHUB_REPOSITORY");
+    const repoFull = envFn("GITHUB_REPOSITORY");
     const [owner, repo] = repoFull ? repoFull.split("/") : ["", ""];
-    const eventPath = env("GITHUB_EVENT_PATH");
-    const sha = env("GITHUB_SHA");
+    const eventPath = envFn("GITHUB_EVENT_PATH");
+    const sha = envFn("GITHUB_SHA");
 
-    // harvest latest-only
-    const { message, source, headSha } = await harvestMessageLatestOnly({
+    // harvest directives and labels
+    const payload = readEventPayload(eventPath);
+    const { message, source, headSha, labels, modeInput } = await harvestDirectiveContext({
       token,
       owner,
       repo,
       eventPath,
       sha,
+      explicitInputs,
+      coreImpl,
     });
+    const refName = envFn("GITHUB_REF_NAME") || getRefName(payload);
 
     // compute plan (falls back to config defaults if message has no directives)
     const plan = computePlan({
       config,
       message,
-      labels: labelsOverride,
+      labels,
+      profile: explicitInputs.profile,
       inputs: { modeInput },
+      context: { refName },
     });
 
     // outputs
-    core.setOutput("mode", plan.mode);
-    core.setOutput("only_jobs", plan.onlyJobs);
-    core.setOutput("skip_jobs", plan.skipJobs);
-    core.setOutput("targets_json", plan.targetsJson);
-    core.setOutput("targets_list", plan.targetsList);
-    core.setOutput("enabled_jobs", plan.enabledJobs.join(" "));
+    coreImpl.setOutput("mode", plan.mode);
+    coreImpl.setOutput("only_jobs", plan.onlyJobs);
+    coreImpl.setOutput("only_jobs_json", plan.onlyJobsJson);
+    coreImpl.setOutput("skip_jobs", plan.skipJobs);
+    coreImpl.setOutput("skip_jobs_json", plan.skipJobsJson);
+    coreImpl.setOutput("targets_json", plan.targetsJson);
+    coreImpl.setOutput("targets_list", plan.targetsList);
+    coreImpl.setOutput("matrix_json", plan.matrixJson);
+    coreImpl.setOutput("enabled_jobs", plan.enabledJobs.join(" "));
+    coreImpl.setOutput("enabled_jobs_json", plan.enabledJobsJson);
+    coreImpl.setOutput("warnings_json", plan.warningsJson);
+    coreImpl.setOutput("profile", plan.profile);
+    coreImpl.setOutput("enabled_profiles_json", plan.enabledProfilesJson);
+    coreImpl.setOutput("pkg_enabled", plan.pkgEnabled ? "true" : "false");
+    coreImpl.setOutput("pkg_targets_json", plan.pkgTargetsJson);
+    coreImpl.setOutput("pkg_matrix_json", plan.pkgMatrixJson);
+    coreImpl.setOutput("pkg_matrix_rows_json", plan.pkgMatrixRowsJson);
 
     // debug
-    core.setOutput("directive_source", source);
-    core.setOutput("head_commit_sha", headSha || "");
-    core.setOutput("raw_message", plan.rawMessage || message || "");
-    core.setOutput("raw_directives", JSON.stringify(plan.debug?.directives || {}));
+    coreImpl.setOutput("directive_source", source);
+    coreImpl.setOutput("head_commit_sha", headSha || "");
+    coreImpl.setOutput("raw_message", plan.rawMessage || message || "");
+    coreImpl.setOutput("raw_directives", JSON.stringify(plan.debug?.directives || {}));
+    coreImpl.setOutput("targets_debug", JSON.stringify(
+      plan.debug?.workingTargets ||
+      plan.debug?.pkgTargets ||
+      []
+    ));
 
     // summary
-    core.startGroup("planner summary");
-    core.info(`SOURCE: ${source}`);
-    if (headSha) core.info(`HEAD_SHA: ${headSha}`);
-    core.info(`MODE: ${plan.mode}`);
-    core.info(`ENABLED_JOBS: ${plan.enabledJobs.join(" ")}`);
-    core.info(`ONLY_JOBS: ${plan.onlyJobs || "<empty>"}`);
-    core.info(`SKIP_JOBS: ${plan.skipJobs || "<empty>"}`);
-    core.info(`TARGETS_LIST: ${plan.targetsList}`);
-    core.info(`TARGETS_JSON: ${plan.targetsJson}`);
-    core.info(`RAW_MESSAGE: ${plan.rawMessage || "<empty>"}`);
-    core.info(`RAW_DIRECTIVES: ${JSON.stringify(plan.debug?.directives || {})}`);
-    core.endGroup();
+    coreImpl.startGroup("planner summary");
+    coreImpl.info(`SOURCE: ${source}`);
+    if (headSha) coreImpl.info(`HEAD_SHA: ${headSha}`);
+    coreImpl.info(`MODE: ${plan.mode}`);
+    coreImpl.info(`ENABLED_JOBS: ${plan.enabledJobs.join(" ")}`);
+    coreImpl.info(`ONLY_JOBS: ${plan.onlyJobs || "<empty>"}`);
+    coreImpl.info(`SKIP_JOBS: ${plan.skipJobs || "<empty>"}`);
+    coreImpl.info(`TARGETS_LIST: ${plan.targetsList}`);
+    coreImpl.info(`TARGETS_JSON: ${plan.targetsJson}`);
+    coreImpl.info(`MATRIX_JSON: ${plan.matrixJson}`);
+    coreImpl.info(`PROFILE: ${plan.profile}`);
+    coreImpl.info(`ENABLED_PROFILES: ${plan.enabledProfiles.join(" ")}`);
+    coreImpl.info(`PKG_ENABLED: ${plan.pkgEnabled ? "true" : "false"}`);
+    coreImpl.info(`PKG_TARGETS_JSON: ${plan.pkgTargetsJson}`);
+    coreImpl.info(`PKG_MATRIX_JSON: ${plan.pkgMatrixJson}`);
+    coreImpl.info(`RAW_MESSAGE: ${plan.rawMessage || "<empty>"}`);
+    coreImpl.info(`RAW_DIRECTIVES: ${JSON.stringify(plan.debug?.directives || {})}`);
+    coreImpl.info(`LABELS: ${labels.join(" ") || "<empty>"}`);
+    if (plan.warnings.length) {
+      coreImpl.info(`WARNINGS: ${plan.warnings.join(" | ")}`);
+      for (const warning of plan.warnings) coreImpl.warning(warning);
+    }
+    coreImpl.endGroup();
   } catch (err) {
-    core.setFailed(err instanceof Error ? err.message : String(err));
+    coreImpl.setFailed(err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -363,6 +1054,10 @@ if (require.main === module) run();
 
 module.exports = {
   computePlan,
+  extractContextFromPayload,
+  extractDispatchOverridesFromPayload,
+  extractLabelsFromPayload,
+  run,
   parseDirectives,
   normalizeList,
   lowerUnique,

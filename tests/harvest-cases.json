@@ -1,0 +1,79 @@
+[
+  {
+    "name": "payload labels are extracted from pull request",
+    "payload": {
+      "pull_request": {
+        "labels": [
+          { "name": "ci-mode-full" },
+          { "name": "Needs-Docs" }
+        ]
+      }
+    },
+    "expected": {
+      "source": "payload-none",
+      "message": "",
+      "modeInput": "",
+      "labels": ["ci-mode-full", "needs-docs"]
+    }
+  },
+  {
+    "name": "pull request title and body directives are harvested",
+    "payload": {
+      "pull_request": {
+        "title": "Packaging discussion",
+        "body": "mode=full\nonly=feelpp-full",
+        "head": {
+          "sha": "abc123"
+        }
+      }
+    },
+    "expected": {
+      "source": "pr-title-body",
+      "message": "Packaging discussion\nmode=full\nonly=feelpp-full",
+      "modeInput": "",
+      "labels": []
+    }
+  },
+  {
+    "name": "workflow dispatch payload inputs are harvested",
+    "payload": {
+      "inputs": {
+        "mode": "full",
+        "message": "only=feelpp-full",
+        "labels": "ci-mode-full,docs"
+      }
+    },
+    "expected": {
+      "source": "workflow-dispatch-input",
+      "message": "only=feelpp-full",
+      "modeInput": "full",
+      "labels": ["ci-mode-full", "docs"]
+    }
+  },
+  {
+    "name": "explicit overrides beat payload values",
+    "payload": {
+      "inputs": {
+        "mode": "full",
+        "message": "only=feelpp-full",
+        "labels": "ci-mode-full"
+      },
+      "pull_request": {
+        "labels": [
+          { "name": "ci-mode-components" }
+        ]
+      }
+    },
+    "explicitInputs": {
+      "modeInput": "components",
+      "messageOverride": "only=toolboxes",
+      "labelsOverride": "manual-label"
+    },
+    "expected": {
+      "source": "override",
+      "message": "only=toolboxes",
+      "modeInput": "components",
+      "labels": ["manual-label"]
+    }
+  }
+]

@@ -1,0 +1,91 @@
+[
+  {
+    "name": "action run propagates packaging profile input",
+    "inputs": {
+      "config-path": "plan-ci.json",
+      "profile": "packaging"
+    },
+    "config": {
+      "profiles": {
+        "ci": {
+          "jobs": ["feelpp"],
+          "defaults": {
+            "mode": "components",
+            "jobs": ["feelpp"],
+            "targets": ["ubuntu:24.04"]
+          }
+        },
+        "packaging": {
+          "jobs": ["packaging"],
+          "defaults": {
+            "targets": ["ubuntu:noble"]
+          },
+          "catalog": {
+            "ubuntu:noble": {
+              "flavor": "ubuntu",
+              "dist": "noble",
+              "version": "24.04",
+              "docker": true,
+              "apptainer": true
+            }
+          }
+        }
+      }
+    },
+    "expected": {
+      "profile": "packaging",
+      "mode": "packaging",
+      "directiveSource": "none",
+      "enabledJobsJson": ["packaging"],
+      "targetsJson": ["ubuntu:noble"],
+      "matrixIncludeLen": 1,
+      "warningCount": 0
+    }
+  },
+  {
+    "name": "action run keeps packaging profile with explicit pkg directive",
+    "inputs": {
+      "config-path": "plan-ci.json",
+      "profile": "packaging",
+      "message-override": "pkg=trixie"
+    },
+    "config": {
+      "profiles": {
+        "packaging": {
+          "jobs": ["packaging"],
+          "defaults": {
+            "targets": ["ubuntu:noble"]
+          },
+          "catalog": {
+            "ubuntu:noble": {
+              "flavor": "ubuntu",
+              "dist": "noble",
+              "version": "24.04",
+              "docker": true,
+              "apptainer": true
+            },
+            "debian:trixie": {
+              "flavor": "debian",
+              "dist": "trixie",
+              "version": "13",
+              "docker": true,
+              "apptainer": true
+            }
+          },
+          "groups": {
+            "trixie": ["debian:trixie"]
+          }
+        }
+      }
+    },
+    "expected": {
+      "profile": "packaging",
+      "mode": "packaging",
+      "directiveSource": "override",
+      "enabledJobsJson": ["packaging"],
+      "targetsJson": ["debian:trixie"],
+      "matrixIncludeLen": 1,
+      "warningCount": 0
+    }
+  }
+]

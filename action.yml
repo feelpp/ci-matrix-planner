@@ -1,5 +1,5 @@
 name: "CI Matrix Planner"
-description: "Parses commit/PR message and labels to compute enabled jobs and targets"
+description: "Parses action inputs, PR metadata, labels, and directives to compute CI or packaging matrices"
 runs:
   using: node20
   main: dist/index.js
@@ -11,37 +11,63 @@ inputs:
     description: "Path to JSON config file in the consumer repo"
     required: false
     default: ".github/plan-ci.json"
+  profile:
+    description: "Explicit profile to resolve when using profile-based configs"
+    required: false
+    default: ""
   mode-input:
-    description: "Override mode via workflow_dispatch (components|full)"
+    description: "Override mode directly (components|full)"
     required: false
     default: ""
   message-override:
-    description: "Override message for debugging"
+    description: "Override directive message directly"
     required: false
     default: ""
   labels-override:
-    description: "Comma-separated labels for debugging"
+    description: "Comma-separated labels to use instead of payload labels"
     required: false
     default: ""
   github-token:
-    description: "GitHub token to allow reading PR commit messages via API"
+    description: "GitHub token to allow reading PR head/push commit messages via API"
     required: false
     default: ""
 outputs:
   mode:
-    description: "Resolved mode (components|full)"
+    description: "Resolved planning mode (components|full|packaging)"
   only_jobs:
     description: "Space-separated list of jobs explicitly requested (may be empty)"
+  only_jobs_json:
+    description: "JSON array of jobs explicitly requested"
   skip_jobs:
     description: "Space-separated list of jobs to skip (may be empty)"
+  skip_jobs_json:
+    description: "JSON array of jobs to skip"
   targets_json:
-    description: "JSON array of targets to use in matrix"
+    description: "JSON array of selected target keys"
   targets_list:
     description: "Space-separated list of targets"
+  matrix_json:
+    description: "JSON workflow matrix object for the selected profile"
   enabled_jobs:
-    description: space-separated list of jobs that will run
+    description: "Space-separated list of jobs that will run"
+  enabled_jobs_json:
+    description: "JSON array of jobs that will run"
+  warnings_json:
+    description: "JSON array of planner warnings"
+  profile:
+    description: "Resolved profile (for profile-based configs)"
+  enabled_profiles_json:
+    description: "JSON array of enabled profiles"
+  pkg_enabled:
+    description: "Whether packaging targets are enabled"
+  pkg_targets_json:
+    description: "JSON array of packaging targets"
+  pkg_matrix_json:
+    description: "JSON packaging matrix object"
+  pkg_matrix_rows_json:
+    description: "JSON array of packaging matrix rows"
   raw_message:     { description: "Message used for parsing (debug)" }
   raw_directives:  { description: "Parsed directives JSON (debug)" }
   targets_debug:   { description: "Working targets JSON (debug)" }
   directive_source: { description: "Source of directives (debug)" }
-
+  head_commit_sha: { description: "Head commit SHA used when directives were harvested from a commit" }

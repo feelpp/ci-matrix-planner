@@ -63,7 +63,9 @@
     "labels": [],
     "expected": {
       "mode": "full",
-      "enabledJobs": ["feelpp-full"]
+      "enabledJobs": ["feelpp-full"],
+      "enabledJobsJson": ["feelpp-full"],
+      "notEnabledJobs": ["feelpp"]
     }
   },
   {
@@ -141,6 +143,404 @@
     "expected": {
       "mode": "full",
       "enabledJobs": ["feelpp-full"]
+    }
+  },
+  {
+    "name": "feelpp-5 current config defaults",
+    "config": {
+      "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
+      "targets": ["ubuntu:24.04", "debian:13", "fedora:42"],
+      "defaults": {
+        "mode": "components",
+        "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
+        "targets": ["ubuntu:24.04"]
+      },
+      "fullBuild": {
+        "job": "feelpp-full",
+        "targets": ["ubuntu:24.04"]
+      }
+    },
+    "message": "",
+    "labels": [],
+    "expected": {
+      "mode": "components",
+      "enabledJobs": ["feelpp", "testsuite", "toolboxes", "mor"],
+      "targetsList": "ubuntu:24.04"
+    }
+  },
+  {
+    "name": "feelpp-5 current config only toolboxes",
+    "config": {
+      "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
+      "targets": ["ubuntu:24.04", "debian:13", "fedora:42"],
+      "defaults": {
+        "mode": "components",
+        "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
+        "targets": ["ubuntu:24.04"]
+      },
+      "fullBuild": {
+        "job": "feelpp-full",
+        "targets": ["ubuntu:24.04"]
+      }
+    },
+    "message": "only=toolboxes",
+    "labels": [],
+    "expected": {
+      "mode": "components",
+      "enabledJobs": ["toolboxes"],
+      "targetsList": "ubuntu:24.04"
+    }
+  },
+  {
+    "name": "feelpp-5 current config auto full mode",
+    "config": {
+      "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
+      "targets": ["ubuntu:24.04", "debian:13", "fedora:42"],
+      "defaults": {
+        "mode": "components",
+        "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
+        "targets": ["ubuntu:24.04"]
+      },
+      "fullBuild": {
+        "job": "feelpp-full",
+        "targets": ["ubuntu:24.04"]
+      }
+    },
+    "message": "only=feelpp-full",
+    "labels": [],
+    "expected": {
+      "mode": "full",
+      "enabledJobs": ["feelpp-full"],
+      "targetsList": "ubuntu:24.04"
+    }
+  },
+  {
+    "name": "feelpp-5 current config explicit full mode",
+    "config": {
+      "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
+      "targets": ["ubuntu:24.04", "debian:13", "fedora:42"],
+      "defaults": {
+        "mode": "components",
+        "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
+        "targets": ["ubuntu:24.04"]
+      },
+      "fullBuild": {
+        "job": "feelpp-full",
+        "targets": ["ubuntu:24.04"]
+      }
+    },
+    "message": "mode=full",
+    "labels": [],
+    "expected": {
+      "mode": "full",
+      "enabledJobs": ["feelpp-full"],
+      "targetsList": "ubuntu:24.04"
+    }
+  },
+  {
+    "name": "feelpp-5 current config include extra targets",
+    "config": {
+      "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
+      "targets": ["ubuntu:24.04", "debian:13", "fedora:42"],
+      "defaults": {
+        "mode": "components",
+        "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
+        "targets": ["ubuntu:24.04"]
+      },
+      "fullBuild": {
+        "job": "feelpp-full",
+        "targets": ["ubuntu:24.04"]
+      }
+    },
+    "message": "include=debian:13\ninclude=fedora:42",
+    "labels": [],
+    "expected": {
+      "mode": "components",
+      "enabledJobs": ["feelpp", "testsuite", "toolboxes", "mor"],
+      "targetsList": "ubuntu:24.04 debian:13 fedora:42"
+    }
+  },
+  {
+    "name": "packaging defaults enabled on develop",
+    "profile": "ci",
+    "context": {
+      "refName": "develop"
+    },
+    "config": {
+      "profiles": {
+        "ci": {
+          "jobs": ["feelpp"],
+          "defaults": {
+            "mode": "components",
+            "jobs": ["feelpp"],
+            "targets": ["ubuntu:24.04"]
+          }
+        },
+        "packaging": {
+          "defaults": {
+            "targets": ["ubuntu:noble"]
+          },
+          "catalog": {
+            "ubuntu:noble": {
+              "flavor": "ubuntu",
+              "dist": "noble",
+              "version": "24.04",
+              "docker": true,
+              "apptainer": true
+            }
+          }
+        }
+      },
+      "packaging": {
+        "defaultOnBranches": ["develop"]
+      }
+    },
+    "message": "",
+    "labels": [],
+    "expected": {
+      "enabledProfiles": ["ci", "packaging"],
+      "pkgEnabled": true,
+      "pkgTargets": ["ubuntu:noble"],
+      "pkgMatrixIncludeLen": 1
+    }
+  },
+  {
+    "name": "packaging explicit targets override defaults",
+    "profile": "ci",
+    "context": {
+      "refName": "feature-branch"
+    },
+    "config": {
+      "profiles": {
+        "ci": {
+          "jobs": ["feelpp"],
+          "defaults": {
+            "mode": "components",
+            "jobs": ["feelpp"],
+            "targets": ["ubuntu:24.04"]
+          }
+        },
+        "packaging": {
+          "defaults": {
+            "targets": ["ubuntu:noble"]
+          },
+          "catalog": {
+            "ubuntu:noble": {
+              "flavor": "ubuntu",
+              "dist": "noble",
+              "version": "24.04",
+              "docker": true,
+              "apptainer": true
+            },
+            "debian:trixie": {
+              "flavor": "debian",
+              "dist": "trixie",
+              "version": "13",
+              "docker": true,
+              "apptainer": true
+            }
+          }
+        }
+      },
+      "packaging": {
+        "groups": {
+          "trixie": ["debian:trixie"]
+        }
+      }
+    },
+    "message": "pkg=trixie",
+    "labels": [],
+    "expected": {
+      "enabledProfiles": ["ci", "packaging"],
+      "pkgEnabled": true,
+      "pkgTargets": ["debian:trixie"],
+      "pkgMatrixIncludeLen": 1
+    }
+  },
+  {
+    "name": "packaging include and exclude are applied",
+    "profile": "ci",
+    "context": {
+      "refName": "feature-branch"
+    },
+    "config": {
+      "profiles": {
+        "ci": {
+          "jobs": ["feelpp"],
+          "defaults": {
+            "mode": "components",
+            "jobs": ["feelpp"],
+            "targets": ["ubuntu:24.04"]
+          }
+        },
+        "packaging": {
+          "defaults": {
+            "targets": ["ubuntu:noble"]
+          },
+          "catalog": {
+            "ubuntu:noble": {
+              "flavor": "ubuntu",
+              "dist": "noble",
+              "version": "24.04",
+              "docker": true,
+              "apptainer": true
+            },
+            "debian:trixie": {
+              "flavor": "debian",
+              "dist": "trixie",
+              "version": "13",
+              "docker": true,
+              "apptainer": true
+            }
+          }
+        }
+      }
+    },
+    "message": "pkg=ubuntu:noble\npkg-include=debian:trixie\npkg-exclude=ubuntu:noble",
+    "labels": [],
+    "expected": {
+      "enabledProfiles": ["ci", "packaging"],
+      "pkgEnabled": true,
+      "pkgTargets": ["debian:trixie"],
+      "pkgMatrixIncludeLen": 1
+    }
+  },
+  {
+    "name": "packaging profile defaults become primary matrix",
+    "profile": "packaging",
+    "config": {
+      "profiles": {
+        "ci": {
+          "jobs": ["feelpp"],
+          "defaults": {
+            "mode": "components",
+            "jobs": ["feelpp"],
+            "targets": ["ubuntu:24.04"]
+          }
+        },
+        "packaging": {
+          "jobs": ["packaging"],
+          "defaults": {
+            "targets": ["ubuntu:noble"]
+          },
+          "catalog": {
+            "ubuntu:noble": {
+              "flavor": "ubuntu",
+              "dist": "noble",
+              "version": "24.04",
+              "docker": true,
+              "apptainer": true
+            }
+          }
+        }
+      }
+    },
+    "message": "",
+    "labels": [],
+    "expected": {
+      "profile": "packaging",
+      "mode": "packaging",
+      "enabledJobs": ["packaging"],
+      "enabledJobsJson": ["packaging"],
+      "notEnabledJobs": ["feelpp"],
+      "enabledProfiles": ["packaging"],
+      "pkgEnabled": true,
+      "pkgTargets": ["ubuntu:noble"],
+      "targetsList": "ubuntu:noble",
+      "matrixIncludeLen": 1,
+      "pkgMatrixIncludeLen": 1
+    }
+  },
+  {
+    "name": "packaging profile explicit group target",
+    "profile": "packaging",
+    "config": {
+      "profiles": {
+        "packaging": {
+          "jobs": ["packaging"],
+          "defaults": {
+            "targets": ["ubuntu:noble"]
+          },
+          "catalog": {
+            "ubuntu:noble": {
+              "flavor": "ubuntu",
+              "dist": "noble",
+              "version": "24.04",
+              "docker": true,
+              "apptainer": true
+            },
+            "debian:trixie": {
+              "flavor": "debian",
+              "dist": "trixie",
+              "version": "13",
+              "docker": true,
+              "apptainer": true
+            }
+          },
+          "groups": {
+            "trixie": ["debian:trixie"]
+          }
+        }
+      }
+    },
+    "message": "pkg=trixie",
+    "labels": [],
+    "expected": {
+      "profile": "packaging",
+      "mode": "packaging",
+      "enabledJobs": ["packaging"],
+      "enabledProfiles": ["packaging"],
+      "pkgEnabled": true,
+      "pkgTargets": ["debian:trixie"],
+      "targetsList": "debian:trixie",
+      "matrixIncludeLen": 1,
+      "pkgMatrixIncludeLen": 1
+    }
+  },
+  {
+    "name": "repeated pkg directives are merged",
+    "profile": "packaging",
+    "config": {
+      "profiles": {
+        "packaging": {
+          "jobs": ["packaging"],
+          "defaults": {
+            "targets": ["ubuntu:noble"]
+          },
+          "catalog": {
+            "ubuntu:noble": {
+              "flavor": "ubuntu",
+              "dist": "noble",
+              "version": "24.04",
+              "docker": true,
+              "apptainer": true
+            },
+            "debian:trixie": {
+              "flavor": "debian",
+              "dist": "trixie",
+              "version": "13",
+              "docker": true,
+              "apptainer": true
+            }
+          },
+          "groups": {
+            "noble": ["ubuntu:noble"],
+            "trixie": ["debian:trixie"]
+          }
+        }
+      }
+    },
+    "message": "pkg=noble\npkg=trixie",
+    "labels": [],
+    "expected": {
+      "profile": "packaging",
+      "mode": "packaging",
+      "enabledJobs": ["packaging"],
+      "pkgEnabled": true,
+      "pkgTargets": ["ubuntu:noble", "debian:trixie"],
+      "targetsList": "ubuntu:noble debian:trixie",
+      "matrixIncludeLen": 2,
+      "pkgMatrixIncludeLen": 2
     }
   }
 ]
