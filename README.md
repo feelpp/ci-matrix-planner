@@ -1,6 +1,6 @@
 # CI Matrix Planner
 
-!["Build Status"](https://github.com/feelpp/ci-matrix-planner/actions/workflows/test.yml/badge.svg)
+[![CI](https://github.com/feelpp/ci-matrix-planner/actions/workflows/ci.yml/badge.svg)](https://github.com/feelpp/ci-matrix-planner/actions/workflows/ci.yml)
 
 A reusable GitHub Action to ***plan your CI job matrix*** based on action inputs, workflow dispatch inputs, pull request metadata, labels, or commit messages.  
 It helps you control which jobs and targets are executed in your workflows, making CI faster, more configurable, and easier to maintain across projects.  
