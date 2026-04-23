@@ -368,6 +368,26 @@ function resolvePlanningConfig(config, requestedProfile, warnings) {
   };
 }
 
+function getNamedProfileConfig(config, profileName) {
+  const requested = String(profileName || "").trim().toLowerCase();
+  if (!requested) {
+    return {};
+  }
+
+  const profiles = config?.profiles;
+  if (!profiles || typeof profiles !== "object" || Array.isArray(profiles)) {
+    return {};
+  }
+
+  for (const [name, profileConfig] of Object.entries(profiles)) {
+    if (String(name).toLowerCase() === requested) {
+      return profileConfig || {};
+    }
+  }
+
+  return {};
+}
+
 function buildMatrixForTargets(targets, catalog, warnings) {
   if (!Object.keys(catalog || {}).length) {
     return {
@@ -400,7 +420,7 @@ function getRefName(payload) {
 }
 
 function getPackagingProfileConfig(config) {
-  return config?.profiles?.[PACKAGING_PROFILE] || {};
+  return getNamedProfileConfig(config, PACKAGING_PROFILE);
 }
 
 function getPackagingConfig(config, activeProfile, activeConfig) {
@@ -435,6 +455,38 @@ function getCatalogProfileConfig(activeConfig, activeProfile) {
     defaultTargets: activeConfig?.defaultTargets || [],
     catalog: activeConfig?.catalog || {},
     groups: activeConfig?.groups || {},
+  };
+}
+
+function resolveMatrixCatalog(config, activeConfig, warnings) {
+  const matrixCatalogProfile = String(activeConfig?.matrixCatalogProfile || "").trim().toLowerCase();
+  if (!matrixCatalogProfile) {
+    return {
+      profile: "",
+      catalog: {},
+    };
+  }
+
+  const profileConfig = getNamedProfileConfig(config, matrixCatalogProfile);
+  if (!Object.keys(profileConfig || {}).length) {
+    warnings.push(`Matrix catalog profile "${matrixCatalogProfile}" was not found`);
+    return {
+      profile: matrixCatalogProfile,
+      catalog: {},
+    };
+  }
+
+  if (!profileConfig.catalog || typeof profileConfig.catalog !== "object" || Array.isArray(profileConfig.catalog)) {
+    warnings.push(`Matrix catalog profile "${matrixCatalogProfile}" has no catalog`);
+    return {
+      profile: matrixCatalogProfile,
+      catalog: {},
+    };
+  }
+
+  return {
+    profile: matrixCatalogProfile,
+    catalog: normalizeCatalog(profileConfig.catalog),
   };
 }
 
@@ -1004,6 +1056,13 @@ function computePlan(opts) {
     warnings.push("No jobs selected after applying only=/skip= filters");
   }
 
+  const resolvedMatrixCatalog = resolveMatrixCatalog(cfg, activeConfig, warnings);
+  const { matrix, matrixRows } = buildMatrixForTargets(
+    workingTargets,
+    resolvedMatrixCatalog.catalog,
+    warnings
+  );
+
   const basePlan = {
     mode,
     enabledJobs,
@@ -1014,11 +1073,19 @@ function computePlan(opts) {
     skipJobsJson: listToJson(skipJobsList),
     targetsList: workingTargets.join(" "),
     targetsJson: JSON.stringify(workingTargets),
-    matrixJson: JSON.stringify({ target: workingTargets }),
+    matrixJson: JSON.stringify(matrix),
     rawMessage: message,
     warnings,
     warningsJson: listToJson(warnings),
-    debug: { directives, labels, workingTargets, fullModeJobs, allValidJobs },
+    debug: {
+      directives,
+      labels,
+      workingTargets,
+      matrixCatalogProfile: resolvedMatrixCatalog.profile,
+      matrixRows,
+      fullModeJobs,
+      allValidJobs,
+    },
   };
 
   // Packaging profile handling (Phase 2)

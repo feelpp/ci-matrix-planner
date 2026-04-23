@@ -136,6 +136,58 @@
     }
   },
   {
+    "name": "action run enriches ci matrix from images catalog",
+    "inputs": {
+      "config-path": "plan-ci.json"
+    },
+    "config": {
+      "profiles": {
+        "ci": {
+          "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
+          "targets": ["ubuntu:noble", "debian:trixie"],
+          "matrixCatalogProfile": "images",
+          "defaults": {
+            "mode": "components",
+            "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
+            "targets": ["ubuntu:noble"]
+          },
+          "fullBuild": {
+            "job": "feelpp-full",
+            "targets": ["ubuntu:noble"]
+          }
+        },
+        "images": {
+          "jobs": ["images"],
+          "defaults": {
+            "targets": ["ubuntu:noble"]
+          },
+          "catalog": {
+            "ubuntu:noble": {
+              "flavor": "ubuntu",
+              "dist": "noble",
+              "version": "24.04",
+              "docker": true,
+              "oci_dist": "ubuntu-24.04",
+              "image_backend": "apt",
+              "image_strategy": "components",
+              "component_set": "default",
+              "base_image": "ubuntu:24.04"
+            }
+          }
+        }
+      }
+    },
+    "expected": {
+      "profile": "ci",
+      "mode": "components",
+      "directiveSource": "none",
+      "enabledJobsJson": ["feelpp", "testsuite", "toolboxes", "mor"],
+      "targetsJson": ["ubuntu:noble"],
+      "matrixIncludeLen": 1,
+      "warningCount": 0
+    }
+  },
+  {
     "name": "action run keeps images profile with explicit group target",
     "inputs": {
       "config-path": "plan-ci.json",

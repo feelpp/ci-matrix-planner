@@ -20,9 +20,10 @@ It helps you control which jobs and targets are executed in your workflows, maki
   * `skip=...` → skip specific jobs.
   * `targets=...` → override matrix targets.
   * `include=...` / `exclude=...` → adjust targets incrementally.
-  * `pkg=...` → select packaging targets (profile-driven).
-  * `pkg-include=...` / `pkg-exclude=...` → adjust packaging targets incrementally.
+* `pkg=...` → select packaging targets (profile-driven).
+* `pkg-include=...` / `pkg-exclude=...` → adjust packaging targets incrementally.
 * Catalog-backed profiles such as `images` emit `matrix_json` directly from their target catalog.
+* Non-catalog profiles such as `ci` can set `matrixCatalogProfile` to enrich `matrix_json` from another profile catalog.
 * `profile: packaging` remains packaging-specific and emits the packaging matrix as the primary `matrix_json`.
 * **Auto-detect full mode**: Using `only=feelpp-full` automatically switches to full mode.
 * **Mode-specific targets**: Full mode can have its own default targets.
@@ -118,6 +119,42 @@ It helps you control which jobs and targets are executed in your workflows, maki
   }
 }
 ```
+
+### Config with CI matrix enrichment from another profile
+
+```json
+{
+  "profiles": {
+    "ci": {
+      "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
+      "targets": ["ubuntu:noble", "debian:trixie"],
+      "matrixCatalogProfile": "images",
+      "defaults": {
+        "mode": "components",
+        "targets": ["ubuntu:noble"]
+      }
+    },
+    "images": {
+      "jobs": ["images"],
+      "defaults": {
+        "targets": ["ubuntu:noble"]
+      },
+      "catalog": {
+        "ubuntu:noble": {
+          "oci_dist": "ubuntu-24.04",
+          "image_backend": "apt",
+          "image_strategy": "components",
+          "base_image": "ubuntu:24.04"
+        }
+      }
+    }
+  }
+}
+```
+
+With `matrixCatalogProfile`, the `ci` profile still chooses jobs and targets,
+but its `matrix_json` rows are resolved from `profiles.images.catalog` instead of
+the fallback `{ "target": [...] }` shape.
 
 ## 🚀 Usage in Workflow
 
