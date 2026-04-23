@@ -87,5 +87,106 @@
       "matrixIncludeLen": 1,
       "warningCount": 0
     }
+  },
+  {
+    "name": "action run propagates images profile input",
+    "inputs": {
+      "config-path": "plan-ci.json",
+      "profile": "images"
+    },
+    "config": {
+      "profiles": {
+        "ci": {
+          "jobs": ["feelpp"],
+          "defaults": {
+            "mode": "components",
+            "jobs": ["feelpp"],
+            "targets": ["ubuntu:24.04"]
+          }
+        },
+        "images": {
+          "jobs": ["images"],
+          "defaults": {
+            "targets": ["ubuntu:noble"]
+          },
+          "catalog": {
+            "ubuntu:noble": {
+              "flavor": "ubuntu",
+              "dist": "noble",
+              "version": "24.04",
+              "docker": true,
+              "oci_dist": "ubuntu-24.04",
+              "image_backend": "apt",
+              "image_strategy": "components",
+              "component_set": "default",
+              "base_image": "ubuntu:24.04"
+            }
+          }
+        }
+      }
+    },
+    "expected": {
+      "profile": "images",
+      "mode": "images",
+      "directiveSource": "none",
+      "enabledJobsJson": ["images"],
+      "targetsJson": ["ubuntu:noble"],
+      "matrixIncludeLen": 1,
+      "warningCount": 0
+    }
+  },
+  {
+    "name": "action run keeps images profile with explicit group target",
+    "inputs": {
+      "config-path": "plan-ci.json",
+      "profile": "images",
+      "message-override": "targets=spack"
+    },
+    "config": {
+      "profiles": {
+        "images": {
+          "jobs": ["images"],
+          "defaults": {
+            "targets": ["ubuntu:noble"]
+          },
+          "catalog": {
+            "ubuntu:noble": {
+              "flavor": "ubuntu",
+              "dist": "noble",
+              "version": "24.04",
+              "docker": true,
+              "oci_dist": "ubuntu-24.04",
+              "image_backend": "apt",
+              "image_strategy": "components",
+              "component_set": "default",
+              "base_image": "ubuntu:24.04"
+            },
+            "spack:openmpi": {
+              "flavor": "spack",
+              "dist": "openmpi",
+              "version": "latest",
+              "docker": true,
+              "oci_dist": "spack-openmpi",
+              "image_backend": "spack",
+              "image_strategy": "full",
+              "spack_environment": "cpu/openmpi",
+              "base_image": "ubuntu:24.04"
+            }
+          },
+          "groups": {
+            "spack": ["spack:openmpi"]
+          }
+        }
+      }
+    },
+    "expected": {
+      "profile": "images",
+      "mode": "images",
+      "directiveSource": "override",
+      "enabledJobsJson": ["images"],
+      "targetsJson": ["spack:openmpi"],
+      "matrixIncludeLen": 1,
+      "warningCount": 0
+    }
   }
 ]

@@ -20,7 +20,7 @@ const core = require("@actions/core");
 
 const env = (k, d = "") => process.env[k] || d;
 const SUPPORTED_CI_MODES = new Set(["components", "full"]);
-const DEFAULT_JOBS = ["feelpp", "testsuite", "toolboxes", "mor", "python"];
+const DEFAULT_JOBS = ["feelpp", "testsuite", "toolboxes", "mor"];
 const DEFAULT_TARGETS = ["ubuntu:24.04", "ubuntu:22.04", "debian:13", "debian:12", "fedora:42"];
 const DEFAULT_PROFILE = "ci";
 const PACKAGING_PROFILE = "packaging";
@@ -428,6 +428,118 @@ function getPackagingDefaultTargets(packagingConfig) {
   );
 }
 
+function getCatalogProfileConfig(activeConfig, activeProfile) {
+  return {
+    jobs: activeConfig?.jobs || [String(activeProfile).toLowerCase()],
+    defaults: activeConfig?.defaults || {},
+    defaultTargets: activeConfig?.defaultTargets || [],
+    catalog: activeConfig?.catalog || {},
+    groups: activeConfig?.groups || {},
+  };
+}
+
+function getCatalogDefaultTargets(profileConfig) {
+  return lowerUnique(
+    []
+      .concat(profileConfig?.defaults?.targets || [])
+      .concat(profileConfig?.defaultTargets || [])
+      .filter(Boolean)
+      .map((item) => String(item).toLowerCase())
+  );
+}
+
+function getCatalogKnownTargetSet(defaultTargets, catalog, groups) {
+  return new Set(lowerUnique(
+    []
+      .concat(defaultTargets || [])
+      .concat(Object.keys(catalog || {}))
+      .concat(Object.keys(groups || {}))
+      .concat(Object.values(groups || {}).flatMap((items) => items || []))
+      .filter(Boolean)
+      .map((item) => String(item).toLowerCase())
+  ));
+}
+
+function expandCatalogTokens(tokens, { defaultTargets, catalog, groups }) {
+  const normalized = lowerUnique(tokens || []);
+  const catalogTargets = Object.keys(catalog || {}).map((item) => String(item).toLowerCase());
+  const explicitNoneOnly = normalized.length > 0 && normalized.every((token) => token === "none");
+  const out = [];
+
+  for (const token of normalized) {
+    if (token === "none") continue;
+    if (token === "default") {
+      out.push(...defaultTargets);
+      continue;
+    }
+    if (token === "all") {
+      out.push(...(catalogTargets.length ? catalogTargets : defaultTargets));
+      continue;
+    }
+    if (groups[token]) {
+      out.push(...groups[token]);
+      continue;
+    }
+    out.push(token);
+  }
+
+  return {
+    explicitNoneOnly,
+    targets: lowerUnique(out),
+  };
+}
+
+function normalizeCatalogTargets(rawTargets, sourceName, knownTargetSet, warnings) {
+  if (!knownTargetSet.size) {
+    return lowerUnique(rawTargets || []);
+  }
+  const { valid, unknown } = filterKnownTokens(rawTargets, knownTargetSet);
+  if (unknown.length) {
+    warnings.push(`Unknown targets in ${sourceName}: ${unknown.join(", ")}`);
+  }
+  return valid;
+}
+
+function selectCatalogTargets({ directives, catalogProfileConfig, warnings }) {
+  const defaultTargets = getCatalogDefaultTargets(catalogProfileConfig);
+  const catalog = normalizeCatalog(catalogProfileConfig.catalog || {});
+  const groups = normalizeGroups(catalogProfileConfig.groups || {});
+  const knownTargetSet = getCatalogKnownTargetSet(defaultTargets, catalog, groups);
+
+  const baseRaw = normalizeList(directives.targets || "");
+  const includeRaw = normalizeList(directives.include || "");
+  const excludeRaw = normalizeList(directives.exclude || "");
+
+  const baseExpanded = expandCatalogTokens(baseRaw, { defaultTargets, catalog, groups });
+  const includeExpanded = expandCatalogTokens(includeRaw, { defaultTargets, catalog, groups });
+  const excludeExpanded = expandCatalogTokens(excludeRaw, { defaultTargets, catalog, groups });
+
+  let targets = baseRaw.length
+    ? (baseExpanded.explicitNoneOnly
+      ? []
+      : normalizeCatalogTargets(baseExpanded.targets, "targets=", knownTargetSet, warnings))
+    : defaultTargets.slice();
+
+  if (includeRaw.length) {
+    targets = lowerUnique(targets.concat(
+      normalizeCatalogTargets(includeExpanded.targets, "include=", knownTargetSet, warnings)
+    ));
+  }
+
+  if (excludeRaw.length) {
+    const excludeSet = new Set(
+      normalizeCatalogTargets(excludeExpanded.targets, "exclude=", knownTargetSet, warnings)
+    );
+    targets = targets.filter((target) => !excludeSet.has(target));
+  }
+
+  return {
+    catalog,
+    defaultTargets,
+    workingTargets: lowerUnique(targets),
+  };
+}
+
 function getPackagingKnownTargetSet(defaultTargets, catalog, groups) {
   return new Set(lowerUnique(
     []
@@ -606,6 +718,93 @@ function computePackagingProfilePlan({ cfg, activeConfig, activeProfile, directi
   };
 }
 
+function computeCatalogProfilePlan({ activeConfig, activeProfile, directives, message, labels, warnings }) {
+  const catalogProfileConfig = getCatalogProfileConfig(activeConfig, activeProfile);
+  const configuredJobs = Array.isArray(catalogProfileConfig.jobs)
+    ? catalogProfileConfig.jobs.filter(Boolean)
+    : [];
+  const defaultJobs = configuredJobs.length ? configuredJobs : [String(activeProfile).toLowerCase()];
+  const knownJobSet = new Set(lowerUnique(defaultJobs));
+  const defaultOnlyJobsRaw = normalizeList((catalogProfileConfig.defaults?.onlyJobs || []).join(" "))
+    .filter((item) => !item.includes(":"));
+  const defaultSkipJobsRaw = normalizeList((catalogProfileConfig.defaults?.skipJobs || []).join(" "))
+    .filter((item) => !item.includes(":"));
+  const directiveOnlyJobsRaw = normalizeList(directives.only || "").filter((item) => !item.includes(":"));
+  const directiveSkipJobsRaw = normalizeList(directives.skip || "").filter((item) => !item.includes(":"));
+  const { valid: onlyJobsList, unknown: unknownOnlyJobs } = filterKnownTokens(
+    directiveOnlyJobsRaw.length ? directiveOnlyJobsRaw : defaultOnlyJobsRaw,
+    knownJobSet
+  );
+  const { valid: skipJobsList, unknown: unknownSkipJobs } = filterKnownTokens(
+    directiveSkipJobsRaw.length ? directiveSkipJobsRaw : defaultSkipJobsRaw,
+    knownJobSet
+  );
+
+  if (unknownOnlyJobs.length) {
+    warnings.push(`Unknown jobs in only=: ${unknownOnlyJobs.join(", ")}`);
+  }
+  if (unknownSkipJobs.length) {
+    warnings.push(`Unknown jobs in skip=: ${unknownSkipJobs.join(", ")}`);
+  }
+
+  let enabledJobs = defaultJobs.slice();
+  if (onlyJobsList.length) {
+    enabledJobs = enabledJobs.filter((job) => onlyJobsList.includes(String(job).toLowerCase()));
+  }
+  if (skipJobsList.length) {
+    enabledJobs = enabledJobs.filter((job) => !skipJobsList.includes(String(job).toLowerCase()));
+  }
+  if (!enabledJobs.length) {
+    warnings.push("No jobs selected after applying only=/skip= filters");
+  }
+
+  const selection = selectCatalogTargets({
+    directives,
+    catalogProfileConfig,
+    warnings,
+  });
+  if (!selection.workingTargets.length) {
+    warnings.push("No targets selected");
+  }
+
+  const { matrix, matrixRows } = buildMatrixForTargets(
+    selection.workingTargets,
+    selection.catalog,
+    warnings
+  );
+  const enabledProfiles = [activeProfile];
+
+  return {
+    mode: activeProfile,
+    enabledJobs,
+    enabledJobsJson: listToJson(enabledJobs),
+    onlyJobs: onlyJobsList.join(" "),
+    onlyJobsJson: listToJson(onlyJobsList),
+    skipJobs: skipJobsList.join(" "),
+    skipJobsJson: listToJson(skipJobsList),
+    targetsList: selection.workingTargets.join(" "),
+    targetsJson: listToJson(selection.workingTargets),
+    matrixJson: JSON.stringify(matrix),
+    rawMessage: message,
+    warnings,
+    warningsJson: listToJson(warnings),
+    profile: activeProfile,
+    enabledProfiles,
+    enabledProfilesJson: listToJson(enabledProfiles),
+    pkgEnabled: false,
+    pkgTargets: [],
+    pkgTargetsJson: listToJson([]),
+    pkgMatrixJson: JSON.stringify({ target: [] }),
+    pkgMatrixRowsJson: listToJson([]),
+    debug: {
+      directives,
+      labels,
+      workingTargets: selection.workingTargets,
+      catalogMatrixRows: matrixRows,
+    },
+  };
+}
+
 /* =========================
  * Planner core (pure)
  * ========================= */
@@ -628,6 +827,17 @@ function computePlan(opts) {
       activeProfile,
       directives,
       context,
+      message,
+      labels,
+      warnings,
+    });
+  }
+
+  if (activeProfile !== DEFAULT_PROFILE && activeConfig?.catalog && typeof activeConfig.catalog === "object" && !Array.isArray(activeConfig.catalog)) {
+    return computeCatalogProfilePlan({
+      activeConfig,
+      activeProfile,
+      directives,
       message,
       labels,
       warnings,

@@ -1,5 +1,5 @@
 name: "CI Matrix Planner"
-description: "Parses action inputs, PR metadata, labels, and directives to compute CI or packaging matrices"
+description: "Parses action inputs, PR metadata, labels, and directives to compute CI, image, or packaging matrices"
 runs:
   using: node20
   main: dist/index.js
@@ -33,7 +33,7 @@ inputs:
     default: ""
 outputs:
   mode:
-    description: "Resolved planning mode (components|full|packaging)"
+    description: "Resolved planning mode (components|full|packaging|images|<catalog-profile>)"
   only_jobs:
     description: "Space-separated list of jobs explicitly requested (may be empty)"
   only_jobs_json:

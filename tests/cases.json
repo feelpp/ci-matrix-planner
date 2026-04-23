@@ -2,7 +2,7 @@
   {
     "name": "defaults (components mode)",
     "config": {
-      "jobs": ["feelpp", "testsuite", "toolboxes", "mor", "python"],
+      "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
       "targets": ["ubuntu:24.04", "ubuntu:22.04", "debian:13", "debian:12", "fedora:42"],
       "defaults": { "mode": "components" }
     },
@@ -10,7 +10,7 @@
     "labels": [],
     "expected": {
       "mode": "components",
-      "enabledJobs": ["feelpp", "testsuite", "toolboxes", "mor", "python"],
+      "enabledJobs": ["feelpp", "testsuite", "toolboxes", "mor"],
       "targetsList": "ubuntu:24.04 ubuntu:22.04 debian:13 debian:12 fedora:42"
     }
   },
@@ -56,7 +56,7 @@
   {
     "name": "auto-detect full mode from only=feelpp-full",
     "config": {
-      "jobs": ["feelpp", "testsuite", "toolboxes", "mor", "python"],
+      "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
       "fullBuild": { "job": "feelpp-full" }
     },
     "message": "only=feelpp-full",
@@ -258,6 +258,123 @@
       "mode": "components",
       "enabledJobs": ["feelpp", "testsuite", "toolboxes", "mor"],
       "targetsList": "ubuntu:24.04 debian:13 fedora:42"
+    }
+  },
+  {
+    "name": "images profile defaults become primary matrix",
+    "profile": "images",
+    "config": {
+      "profiles": {
+        "images": {
+          "jobs": ["images"],
+          "defaults": {
+            "targets": ["ubuntu:noble"]
+          },
+          "catalog": {
+            "ubuntu:noble": {
+              "flavor": "ubuntu",
+              "dist": "noble",
+              "version": "24.04",
+              "docker": true,
+              "oci_dist": "ubuntu-24.04",
+              "image_backend": "apt",
+              "image_strategy": "components",
+              "component_set": "default",
+              "base_image": "ubuntu:24.04"
+            },
+            "spack:openmpi": {
+              "flavor": "spack",
+              "dist": "openmpi",
+              "version": "latest",
+              "docker": true,
+              "oci_dist": "spack-openmpi",
+              "image_backend": "spack",
+              "image_strategy": "full",
+              "spack_environment": "cpu/openmpi",
+              "base_image": "ubuntu:24.04"
+            }
+          },
+          "groups": {
+            "ubuntu": ["ubuntu:noble"],
+            "spack": ["spack:openmpi"]
+          }
+        }
+      }
+    },
+    "message": "",
+    "labels": [],
+    "expected": {
+      "profile": "images",
+      "mode": "images",
+      "enabledJobs": ["images"],
+      "enabledProfiles": ["images"],
+      "pkgEnabled": false,
+      "targetsList": "ubuntu:noble",
+      "matrixIncludeLen": 1
+    }
+  },
+  {
+    "name": "images profile expands groups and include/exclude",
+    "profile": "images",
+    "config": {
+      "profiles": {
+        "images": {
+          "jobs": ["images"],
+          "defaults": {
+            "targets": ["ubuntu:noble"]
+          },
+          "catalog": {
+            "ubuntu:noble": {
+              "flavor": "ubuntu",
+              "dist": "noble",
+              "version": "24.04",
+              "docker": true,
+              "oci_dist": "ubuntu-24.04",
+              "image_backend": "apt",
+              "image_strategy": "components",
+              "component_set": "default",
+              "base_image": "ubuntu:24.04"
+            },
+            "debian:trixie": {
+              "flavor": "debian",
+              "dist": "trixie",
+              "version": "13",
+              "docker": true,
+              "oci_dist": "debian-13",
+              "image_backend": "apt",
+              "image_strategy": "components",
+              "component_set": "default",
+              "base_image": "debian:13"
+            },
+            "spack:openmpi": {
+              "flavor": "spack",
+              "dist": "openmpi",
+              "version": "latest",
+              "docker": true,
+              "oci_dist": "spack-openmpi",
+              "image_backend": "spack",
+              "image_strategy": "full",
+              "spack_environment": "cpu/openmpi",
+              "base_image": "ubuntu:24.04"
+            }
+          },
+          "groups": {
+            "debian": ["debian:trixie"],
+            "spack": ["spack:openmpi"]
+          }
+        }
+      }
+    },
+    "message": "targets=spack\ninclude=debian\nexclude=spack:openmpi",
+    "labels": [],
+    "expected": {
+      "profile": "images",
+      "mode": "images",
+      "enabledJobs": ["images"],
+      "enabledProfiles": ["images"],
+      "pkgEnabled": false,
+      "targetsList": "debian:trixie",
+      "matrixIncludeLen": 1
     }
   },
   {

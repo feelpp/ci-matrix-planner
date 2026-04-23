@@ -14,7 +14,7 @@ It helps you control which jobs and targets are executed in your workflows, maki
   * PR title/body
   * PR head commit or push head commit
 * Supported directives:
-  * `mode=components` (default): run split jobs (feelpp, testsuite, toolboxes, mor, python).
+  * `mode=components` (default): run split jobs (feelpp, testsuite, toolboxes, mor).
   * `mode=full`: collapse into full-build job(s) (e.g. `feelpp-full`).
   * `only=...` → run only specific jobs (auto-detects full mode if full job is specified).
   * `skip=...` → skip specific jobs.
@@ -22,7 +22,8 @@ It helps you control which jobs and targets are executed in your workflows, maki
   * `include=...` / `exclude=...` → adjust targets incrementally.
   * `pkg=...` → select packaging targets (profile-driven).
   * `pkg-include=...` / `pkg-exclude=...` → adjust packaging targets incrementally.
-* `profile: packaging` turns the planner into a packaging-first planner and emits the packaging matrix as the primary `matrix_json`.
+* Catalog-backed profiles such as `images` emit `matrix_json` directly from their target catalog.
+* `profile: packaging` remains packaging-specific and emits the packaging matrix as the primary `matrix_json`.
 * **Auto-detect full mode**: Using `only=feelpp-full` automatically switches to full mode.
 * **Mode-specific targets**: Full mode can have its own default targets.
 * **Multiple full jobs**: Support for multiple jobs in full mode.
@@ -46,7 +47,7 @@ It helps you control which jobs and targets are executed in your workflows, maki
 
 | Output | Description |
 | --- | --- |
-| `mode` | `components`, `full`, or `packaging` |
+| `mode` | `components`, `full`, `packaging`, or the active catalog-backed profile name such as `images` |
 | `only_jobs` | Space-separated list of jobs forced by `only=...` |
 | `only_jobs_json` | JSON array of jobs forced by `only=...` |
 | `skip_jobs` | Space-separated list of jobs to skip (`skip=...` or inferred from message tokens) |
@@ -72,11 +73,11 @@ It helps you control which jobs and targets are executed in your workflows, maki
 
 ```json
 {
-  "jobs": ["feelpp", "testsuite", "toolboxes", "mor", "python"],
+  "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
   "targets": ["ubuntu:24.04", "debian:13", "fedora:42"],
   "defaults": {
     "mode": "components",
-    "jobs": ["feelpp", "testsuite", "toolboxes", "mor", "python"],
+    "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
     "targets": ["ubuntu:24.04"]
   },
   "fullBuild": { "job": "feelpp-full" }
@@ -87,7 +88,7 @@ It helps you control which jobs and targets are executed in your workflows, maki
 
 ```json
 {
-  "jobs": ["feelpp", "testsuite", "toolboxes", "mor", "python"],
+  "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
   "targets": ["ubuntu:24.04", "debian:13", "fedora:42"],
   "defaults": {
     "mode": "components",
@@ -95,7 +96,7 @@ It helps you control which jobs and targets are executed in your workflows, maki
   },
   "modes": {
     "components": {
-      "jobs": ["feelpp", "testsuite", "toolboxes", "mor", "python"],
+      "jobs": ["feelpp", "testsuite", "toolboxes", "mor"],
       "targets": ["ubuntu:24.04"]
     },
     "full": {
@@ -110,7 +111,7 @@ It helps you control which jobs and targets are executed in your workflows, maki
 
 ```json
 {
-  "jobs": ["feelpp", "toolboxes", "mor", "python"],
+  "jobs": ["feelpp", "toolboxes", "mor"],
   "fullBuild": {
     "jobs": ["feelpp-full", "feelpp-full-debug"],
     "targets": ["ubuntu:24.04"]
@@ -172,6 +173,30 @@ jobs:
       - run: echo "Packaging ${{ matrix.flavor }}:${{ matrix.dist }}"
 ```
 
+### Catalog-Backed Image Profile Usage
+
+```yaml
+jobs:
+  plan_images:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix_json: ${{ steps.plan.outputs.matrix_json }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        uses: feelpp/ci-matrix-planner@v1
+        with:
+          config-path: .github/plan-ci.json
+          profile: images
+
+  build_images:
+    needs: plan_images
+    strategy:
+      matrix: ${{ fromJSON(needs.plan_images.outputs.matrix_json) }}
+    steps:
+      - run: echo "Build OCI image target ${{ matrix.target }} via ${{ matrix.image_backend }} (${{ matrix.image_strategy }})"
+```
+
 ## 📐 Resolution Order
 
 The planner resolves directives in this order:
@@ -190,7 +215,7 @@ The planner resolves directives in this order:
 | --- | --- |
 | `only=feelpp` | Run only the `feelpp` job |
 | `only=feelpp-full` | Auto-switch to full mode and run `feelpp-full` |
-| `skip=python` | Skip the `python` job |
+| `skip=toolboxes` | Skip the `toolboxes` job |
 | `targets=fedora:42` | Restrict matrix to Fedora 42 |
 | `include=debian:13` | Add Debian 13 to current targets |
 | `exclude=ubuntu:22.04` | Remove Ubuntu 22.04 from current targets |
@@ -199,6 +224,9 @@ The planner resolves directives in this order:
 | `pkg=noble,trixie` | Select packaging targets |
 | `pkg=none` | Disable packaging targets explicitly |
 | `pkg=spack pkg-exclude=spack-openmpi` | Select spack targets and exclude one |
+
+For catalog-backed profiles such as `images`, use `targets=...`, `include=...`,
+and `exclude=...` against the profile catalog and its groups.
 
 ### Labels
 
